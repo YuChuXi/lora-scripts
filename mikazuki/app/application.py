@@ -4,8 +4,9 @@ import os
 import sys
 import webbrowser
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +23,17 @@ mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
 
 
+def frontend_dist_path() -> Path:
+    frontend_dist = Path(os.environ.get("MIKAZUKI_FRONTEND_DIST", "frontend/dist"))
+    if not frontend_dist.is_absolute():
+        frontend_dist = Path.cwd() / frontend_dist
+    return frontend_dist
+
+
+_FRONTEND_DIST = frontend_dist_path()
+_DEFAULT_START_PAGE = "/lora/sd3.html"
+
+
 class SPAStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
         try:
@@ -33,6 +45,47 @@ class SPAStaticFiles(StaticFiles):
                 raise ex
 
 
+_BROWSER_CANDIDATES = {
+    "chrome": [
+        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+    ],
+    "edge": [
+        os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+        os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+    ],
+}
+
+
+def _resolve_browser():
+    """Resolve --browser shortcut (chrome/edge) to a webbrowser controller."""
+    name = os.environ.get("MIKAZUKI_BROWSER", "").lower()
+    if not name or name == "default":
+        return webbrowser
+    candidates = _BROWSER_CANDIDATES.get(name, [])
+    for path in candidates:
+        if os.path.isfile(path):
+            return webbrowser.get(f'"{path}" %s')
+    return webbrowser
+
+
+def _start_url() -> str:
+    page = os.environ.get("MIKAZUKI_START_PAGE", _DEFAULT_START_PAGE).strip() or _DEFAULT_START_PAGE
+    if not page.startswith("/"):
+        page = f"/{page}"
+    return f'http://{os.environ["MIKAZUKI_HOST"]}:{os.environ["MIKAZUKI_PORT"]}{page}'
+
+
+async def _async_update_check():
+    from mikazuki.update_check import check_update, log_update_notice
+    try:
+        await asyncio.to_thread(check_update)
+        log_update_notice()
+    except Exception:
+        pass
+
+
 async def app_startup():
     app_config.load_config()
 
@@ -40,8 +93,21 @@ async def app_startup():
     await load_presets()
     await asyncio.to_thread(check_torch_gpu)
 
+    asyncio.create_task(_async_update_check())
+
     if sys.platform == "win32" and os.environ.get("MIKAZUKI_DEV", "0") != "1":
-        webbrowser.open(f'http://{os.environ["MIKAZUKI_HOST"]}:{os.environ["MIKAZUKI_PORT"]}')
+        import time
+        from mikazuki.log import log as app_log
+
+        browser = _resolve_browser()
+        if browser is not webbrowser:
+            app_log.info(f"Using browser: {os.environ.get('MIKAZUKI_BROWSER', 'default')}")
+
+        browser.open(_start_url())
+        monitor_port = os.environ.get("TRAIN_MONITOR_PORT", "6008")
+        time.sleep(1)
+        app_log.info(f"Opening train monitor in browser: http://127.0.0.1:{monitor_port}")
+        browser.open(f'http://127.0.0.1:{monitor_port}')
 
 
 @asynccontextmanager
@@ -78,14 +144,24 @@ async def add_cache_control_header(request, call_next):
 app.include_router(api_router, prefix="/api")
 # app.include_router(ipc_router, prefix="/ipc")
 
+_TRAIN_LOG_HTML = Path(__file__).resolve().parent.parent / "static" / "train_log.html"
+
+
+@app.get("/train-log")
+async def train_log_viewer():
+    """Fullscreen training log viewer (SSE). Embed: <iframe src="/train-log?task_id=…" />."""
+    if not _TRAIN_LOG_HTML.is_file():
+        raise HTTPException(status_code=404, detail="train_log.html not found")
+    return FileResponse(str(_TRAIN_LOG_HTML))
+
 
 @app.get("/")
 async def index():
-    return FileResponse("./frontend/dist/index.html")
+    return FileResponse(str(_FRONTEND_DIST / "index.html"))
 
 
 @app.get("/favicon.ico", response_class=FileResponse)
 async def favicon():
     return FileResponse("assets/favicon.ico")
 
-app.mount("/", SPAStaticFiles(directory="frontend/dist", html=True), name="static")
+app.mount("/", SPAStaticFiles(directory=str(_FRONTEND_DIST), html=True), name="static")

@@ -1,10 +1,11 @@
-$Env:HF_HOME = "huggingface"
+ï»¿$Env:HF_HOME = "huggingface"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = 1
 $Env:PIP_NO_CACHE_DIR = 1
 $Env:PIP_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
+
 function InstallFail {
-    Write-Output "°²×°Ê§°Ü¡£"
-    Read-Host | Out-Null ;
+    Write-Output "å®‰è£…å¤±è´¥ã€‚"
+    Read-Host | Out-Null
     Exit
 }
 
@@ -17,35 +18,47 @@ function Check {
         InstallFail
     }
 }
+
 if (Test-Path -Path "python\python.exe") {
-    Write-Output "Ê¹ÓÃ python ÎÄ¼ş¼ĞÄÚµÄ python..."
+    Write-Output "ä½¿ç”¨ python æ–‡ä»¶å¤¹ä¸­çš„ python..."
     $py_path = (Get-Item "python").FullName
     $env:PATH = "$py_path;$env:PATH"
 }
 else {
-    if (!(Test-Path -Path "venv")) {
-        Write-Output "ÕıÔÚ´´½¨ĞéÄâ»·¾³..."
-        python -m venv venv
-        Check "´´½¨ĞéÄâ»·¾³Ê§°Ü£¬Çë¼ì²é python ÊÇ·ñ°²×°Íê±ÏÒÔ¼° python °æ±¾ÊÇ·ñÎª64Î»°æ±¾µÄpython 3.10¡¢»òpythonµÄÄ¿Â¼ÊÇ·ñÔÚ»·¾³±äÁ¿PATHÄÚ¡£"
+    # Sync vendor/sd-scripts submodule (Anima training engine)
+    if ((Test-Path -Path ".git") -or (Test-Path -Path ".git" -PathType Leaf)) {
+        Write-Output "åŒæ­¥ git å­æ¨¡å— (vendor/sd-scripts)..."
+        git submodule update --init --recursive
+        if ($LASTEXITCODE -ne 0) {
+            Write-Output "è­¦å‘Š: å­æ¨¡å—åˆå§‹åŒ–å¤±è´¥ï¼ŒAnima è®­ç»ƒå¯èƒ½æ— æ³•å¯åŠ¨ã€‚è¯·æ‰‹åŠ¨è¿è¡Œ: git submodule update --init --recursive"
+        }
     }
-    
-    Write-Output "¼ì²âµ½ĞéÄâ»·¾³£¬³¢ÊÔ¼¤»î..."
+
+    if (!(Test-Path -Path "venv")) {
+        Write-Output "æ­£åœ¨åˆ›å»ºè™šæ‹Ÿç¯å¢ƒ..."
+        python -m venv venv
+        Check "åˆ›å»ºè™šæ‹Ÿç¯å¢ƒå¤±è´¥ï¼Œè¯·æ£€æŸ¥ python æ˜¯å¦å®‰è£…æ­£ç¡®ä»¥åŠ python ç‰ˆæœ¬æ˜¯å¦ä¸º 64 ä½ç‰ˆæœ¬ (python 3.10)ï¼Œpython çš„ç›®å½•æ˜¯å¦åœ¨ç¯å¢ƒå˜é‡ PATH ä¸­ã€‚"
+    }
+
+    Write-Output "æ£€æµ‹åˆ°è™šæ‹Ÿç¯å¢ƒï¼Œæ­£åœ¨æ¿€æ´»..."
     .\venv\Scripts\activate
-    Check "¼¤»îĞéÄâ»·¾³Ê§°Ü¡£"
+    Check "æ¿€æ´»è™šæ‹Ÿç¯å¢ƒå¤±è´¥ã€‚"
 }
 
-Write-Output "°²×°³ÌĞòËùĞèÒÀÀµ (ÒÑ½øĞĞ¹úÄÚ¼ÓËÙ£¬ÈôÔÚ¹úÍâ»òÎŞ·¨Ê¹ÓÃ¼ÓËÙÔ´Çë»»ÓÃ install.ps1 ½Å±¾)"
-Write-Output "ÊÜÏŞÓÚ¹úÄÚ¼ÓËÙ¾µÏñ£¬torch °²×°ÎŞ·¨Ê¹ÓÃ¾µÏñÔ´£¬°²×°½ÏÎª»ºÂı¡£"
-$install_torch = Read-Host "ÊÇ·ñĞèÒª°²×° Torch+xformers? [y/n] (Ä¬ÈÏÎª y)"
+Write-Output "å®‰è£…è®­ç»ƒä¾èµ– (å·²è¿›è¡Œå›½å†…åŠ é€Ÿï¼Œå¦‚åœ¨å›½å¤–æ— æ³•ä½¿ç”¨åŠ é€Ÿæºè¯·æ¢ç”¨ install.ps1 è„šæœ¬)"
+Write-Output "æ³¨æ„ï¼šåœ¨å›½å†…åŠ é€Ÿé•œåƒä¸­ torch å®‰è£…æ— æ³•ä½¿ç”¨é•œåƒæºï¼Œå®‰è£…è¾ƒä¸ºç¼“æ…¢ã€‚"
+$install_torch = Read-Host "æ˜¯å¦éœ€è¦å®‰è£… Torch+xformers? [y/n] (é»˜è®¤ä¸º y)"
 if ($install_torch -eq "y" -or $install_torch -eq "Y" -or $install_torch -eq "") {
     python -m pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 --index-url https://download.pytorch.org/whl/cu128
-    Check "torch °²×°Ê§°Ü£¬ÇëÉ¾³ı venv ÎÄ¼ş¼ĞºóÖØĞÂÔËĞĞ¡£"
+    Check "torch å®‰è£…å¤±è´¥ï¼Œè¯·åˆ é™¤ venv æ–‡ä»¶å¤¹åé‡æ–°è¿è¡Œã€‚"
     python -m pip install -U -I --no-deps xformers===0.0.30 --extra-index-url https://download.pytorch.org/whl/cu128
-    Check "xformers °²×°Ê§°Ü¡£"
+    Check "xformers å®‰è£…å¤±è´¥ã€‚"
 }
 
 python -m pip install --upgrade -r requirements.txt
-Check "ÑµÁ·½çÃæÒÀÀµ°²×°Ê§°Ü¡£"
+Check "è®­ç»ƒä¾èµ–åº“å®‰è£…å¤±è´¥ã€‚"
 
-Write-Output "°²×°Íê±Ï"
-Read-Host | Out-Null ;
+Write-Output "å®‰è£…å®Œæˆ"
+Write-Output ""
+Write-Output "å¯é€‰ï¼šè¿è¡Œ install_flash_attn.bat å¯ç”¨ Flash Attention 2 åŠ é€Ÿã€‚"
+Read-Host | Out-Null

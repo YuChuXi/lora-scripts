@@ -31,8 +31,8 @@
                 full_fp16: Schema.boolean().description("完全使用 FP16 精度"),
                 full_bf16: Schema.boolean().description("完全使用 BF16 精度"),
                 no_half_vae: Schema.boolean().description("不使用半精度 VAE"),
-                xformers: Schema.boolean().default(true).description("启用 xformers"),
-                sdpa: Schema.boolean().description("启用 sdpa"),
+                xformers: Schema.boolean().default(false).description("启用 xformers"),
+                sdpa: Schema.boolean().default(true).description("启用 sdpa"),
                 lowram: Schema.boolean().default(false).description("低内存模式 该模式下会将 U-net、文本编码器、VAE 直接加载到显存中"),
                 cache_latents: Schema.boolean().default(true).description("缓存图像 latent, 缓存 VAE 输出以减少 VRAM 使用"),
                 cache_latents_to_disk: Schema.boolean().default(true).description("缓存图像 latent 到磁盘"),
@@ -98,6 +98,7 @@
                 save_model_as: Schema.union(["safetensors", "pt", "ckpt"]).default("safetensors").description("模型保存格式"),
                 save_precision: Schema.union(["fp16", "float", "bf16"]).default("fp16").description("模型保存精度"),
                 save_every_n_epochs: Schema.number().default(2).description("每 N epoch（轮）自动保存一次模型"),
+                save_every_n_steps: Schema.number().min(1).description("每 N 步自动保存一次模型（与 save_every_n_epochs 二选一即可）"),
                 save_state: Schema.boolean().default(false).description("保存训练状态 配合 `resume` 参数可以继续从某个状态训练"),
             }).description("保存设置"),
             Schema.union([
@@ -138,6 +139,7 @@
                 optimizer_type: Schema.union([
                     "AdamW",
                     "AdamW8bit",
+                    "Automagic",
                     "PagedAdamW8bit",
                     "RAdamScheduleFree",
                     "Lion",
@@ -169,7 +171,7 @@
             ]),
 
             Schema.object({
-                optimizer_args_custom: Schema.array(String).role('table').description('自定义 optimizer_args，一行一个'),
+                optimizer_args_custom: Schema.array(String).role('table').description('自定义 optimizer_args，一行一个。同名参数会覆盖默认值（预览中可能显示重复，实际训练以此处为准）'),
             })
         ]),
 

@@ -1,9 +1,11 @@
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import random
+import sys
 
 from glob import glob
 from datetime import datetime
@@ -11,8 +13,8 @@ from pathlib import Path
 from typing import Tuple, Optional
 
 import toml
-from fastapi import APIRouter, BackgroundTasks, Request
-from starlette.requests import Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 import mikazuki.process as process
 from mikazuki import launch_utils
@@ -23,12 +25,30 @@ from mikazuki.log import log
 from mikazuki.tagger.interrogator import (available_interrogators,
                                           on_interrogate)
 from mikazuki.tasks import tm
+from mikazuki.train_log_hub import hub as train_log_hub
 from mikazuki.utils import train_utils
 from mikazuki.utils.devices import printable_devices
+from mikazuki.portable_utils import flash_attn_stack_usable, is_embedded_python
 from mikazuki.utils.tk_window import (open_directory_selector,
-                                      open_file_selector)
+                                      open_file_selector,
+                                      tkinter_available)
 
 router = APIRouter()
+
+ANIMA_TRAIN_TYPES = {"anima-lora", "sd3-lora"}
+ANIMA_DEFAULT_SAMPLE_POSITIVE = (
+    "1girl, solo, smile, japanese clothes, kimono, blue eyes, closed mouth, upper body, looki"
+    "ng at viewer, hair ornament, long hair, yellow kimono, black hair, anime coloring, yukat"
+    "a, choker, split mouth, side ponytail, bow, brown hair"
+)
+ANIMA_DEFAULT_SAMPLE_NEGATIVE = (
+    "nsfw, explicit, sexual content, nude, naked, nipples, areola, genitals, cleavage, breast"
+    "s, ass, buttocks, thighs, underwear, lingerie, bikini, swimsuit, erotic, suggestive, lew"
+    "d, spread legs, close-up body, transparent clothes, worst quality, low quality, score_1,"
+    " score_2, score_3, artist name, jpeg artifacts"
+)
+ANIMA_DEFAULT_UNET_LR = 5e-5
+ANIMA_LEGACY_UNET_LR = {"0.0001", "1e-4", "1E-4"}
 
 avaliable_scripts = [
     "networks/extract_lora_from_models.py",
@@ -47,10 +67,94 @@ trainer_mapping = {
     "sd-dreambooth": "./scripts/stable/train_db.py",
     "sdxl-finetune": "./scripts/stable/sdxl_train.py",
 
-    "sd3-lora": "./scripts/dev/sd3_train_network.py",
+    "sd3-lora": "./scripts/dev/anima_train_network.py",
+    "anima-lora": "./scripts/dev/anima_train_network.py",
     "flux-lora": "./scripts/dev/flux_train_network.py",
     "flux-finetune": "./scripts/dev/flux_train.py",
 }
+
+
+def _normalize_kv_arg_list(values) -> list[str]:
+    """Normalize key=value style arg list from UI payload."""
+    if not isinstance(values, list):
+        return []
+
+    ordered: list[str] = []
+    key_index: dict[str, int] = {}
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        item = raw.strip()
+        if not item or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if value.lower() in {"undefined", "null", "nan"}:
+            continue
+        normalized = f"{key}={value}"
+        if key in key_index:
+            ordered[key_index[key]] = normalized
+        else:
+            key_index[key] = len(ordered)
+            ordered.append(normalized)
+    return ordered
+
+
+def normalize_custom_args(config: dict) -> None:
+    """
+    Apply generic arg normalization for all training types.
+    - Merge *_custom table input into canonical args list
+    - Drop undefined/null entries
+    - Keep last value on duplicate keys
+    """
+    for base_key in ("network_args", "optimizer_args"):
+        custom_key = f"{base_key}_custom"
+        merged: list[str] = []
+        if isinstance(config.get(base_key), list):
+            merged.extend(config.get(base_key) or [])
+        if isinstance(config.get(custom_key), list):
+            merged.extend(config.get(custom_key) or [])
+
+        normalized = _normalize_kv_arg_list(merged)
+        if normalized:
+            config[base_key] = normalized
+        else:
+            config.pop(base_key, None)
+        config.pop(custom_key, None)
+
+
+def _is_invalid_value(value) -> bool:
+    """Check if a value is invalid and should be stripped before writing TOML."""
+    if value is None:
+        return True
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return True
+    if isinstance(value, str) and value.strip().lower() in {"", "undefined", "null", "nan"}:
+        return True
+    return False
+
+
+_PATH_FIELDS = {
+    "pretrained_model_name_or_path", "vae", "qwen3", "llm_adapter_path",
+    "t5_tokenizer_path", "resume", "train_data_dir", "reg_data_dir",
+    "output_dir", "logging_dir", "network_weights", "sample_prompts",
+}
+
+
+def sanitize_config(config: dict) -> None:
+    """Remove all invalid/empty values from config before writing TOML."""
+    keys_to_remove = [k for k, v in config.items() if _is_invalid_value(v)]
+    for k in keys_to_remove:
+        del config[k]
+    for key in ("network_args", "optimizer_args"):
+        if isinstance(config.get(key), list):
+            config[key] = _normalize_kv_arg_list(config[key])
+    for key in _PATH_FIELDS:
+        if isinstance(config.get(key), str):
+            config[key] = config[key].replace("\\", "/")
 
 
 async def load_schemas():
@@ -84,7 +188,7 @@ async def load_presets():
             avaliable_presets.append(toml.loads(content))
 
 
-def get_sample_prompts(config: dict) -> Tuple[Optional[str], str]:
+def get_sample_prompts(config: dict, model_train_type: str = "sd-lora") -> Tuple[Optional[str], str]:
     # backward compatibility
     if "sample_prompts" in config and "positive_prompts" not in config:
         return None, config["sample_prompts"]
@@ -92,13 +196,22 @@ def get_sample_prompts(config: dict) -> Tuple[Optional[str], str]:
     train_data_dir = config["train_data_dir"]
     sub_dir = [dir for dir in glob(os.path.join(train_data_dir, '*')) if os.path.isdir(dir)]
 
-    positive_prompts = config.pop('positive_prompts', None)
-    negative_prompts = config.pop('negative_prompts', '')
-    sample_width = config.pop('sample_width', 512)
-    sample_height = config.pop('sample_height', 512)
-    sample_cfg = config.pop('sample_cfg', 7)
-    sample_seed = config.pop('sample_seed', 2333)
-    sample_steps = config.pop('sample_steps', 24)
+    use_anima_defaults = model_train_type in ANIMA_TRAIN_TYPES and is_preview_enabled(config)
+    default_positive = ANIMA_DEFAULT_SAMPLE_POSITIVE if use_anima_defaults else None
+    default_negative = ANIMA_DEFAULT_SAMPLE_NEGATIVE if use_anima_defaults else ''
+    default_width = 1024 if use_anima_defaults else 512
+    default_height = 1024 if use_anima_defaults else 512
+    default_cfg = 4.5 if use_anima_defaults else 7
+    default_seed = 42 if use_anima_defaults else 2333
+    default_steps = 40 if use_anima_defaults else 24
+
+    positive_prompts = config.pop('positive_prompts', default_positive)
+    negative_prompts = config.pop('negative_prompts', default_negative)
+    sample_width = config.pop('sample_width', default_width)
+    sample_height = config.pop('sample_height', default_height)
+    sample_cfg = config.pop('sample_cfg', default_cfg)
+    sample_seed = config.pop('sample_seed', default_seed)
+    sample_steps = config.pop('sample_steps', default_steps)
     randomly_choice_prompt = config.pop('randomly_choice_prompt', False)
 
     if randomly_choice_prompt:
@@ -118,6 +231,90 @@ def get_sample_prompts(config: dict) -> Tuple[Optional[str], str]:
     return positive_prompts, f'{positive_prompts} --n {negative_prompts}  --w {sample_width} --h {sample_height} --l {sample_cfg}  --s {sample_steps}  --d {sample_seed}'
 
 
+def apply_sdxl_prediction_type(config: dict, model_train_type: str):
+    prediction_type = config.pop("sdxl_prediction_type", None)
+    if model_train_type != "sdxl-lora":
+        return
+    if prediction_type is None:
+        return
+
+    if prediction_type == "v_prediction":
+        config["v_parameterization"] = True
+        config["flow_model"] = False
+        config["contrastive_flow_matching"] = False
+        return
+
+    if prediction_type == "rectified_flow":
+        config["flow_model"] = True
+        config["v_parameterization"] = False
+        config["scale_v_pred_loss_like_noise_pred"] = False
+        return
+
+    config["v_parameterization"] = False
+    config["scale_v_pred_loss_like_noise_pred"] = False
+    config["flow_model"] = False
+    config["contrastive_flow_matching"] = False
+
+
+def is_preview_enabled(config: dict) -> bool:
+    return config.get("enable_preview") in (True, "true", "True", "1", 1)
+
+
+def _detect_best_attn_mode() -> str:
+    """Auto-detect the best available attention backend for Anima training."""
+    if not is_embedded_python() and flash_attn_stack_usable():
+        return "flash"
+    try:
+        import xformers  # noqa: F401
+        return "xformers"
+    except ImportError:
+        pass
+    return "torch"
+
+
+def apply_anima_training_defaults(config: dict, model_train_type: str):
+    if model_train_type not in ANIMA_TRAIN_TYPES:
+        return
+
+    if str(config.get("unet_lr", "")).strip() in ANIMA_LEGACY_UNET_LR:
+        config["unet_lr"] = ANIMA_DEFAULT_UNET_LR
+    elif isinstance(config.get("unet_lr"), str):
+        config["unet_lr"] = float(config["unet_lr"])
+
+    if is_preview_enabled(config) or config.get("sample_prompts"):
+        config["sample_at_first"] = True
+
+    mixed = config.get("mixed_precision", "")
+    if mixed == "bf16" and not config.get("full_bf16"):
+        config["full_bf16"] = True
+    elif mixed == "fp16" and not config.get("full_fp16"):
+        config["full_fp16"] = True
+
+    requested_attn = config.get("attn_mode", "")
+    if not requested_attn:
+        best = _detect_best_attn_mode()
+        config["attn_mode"] = best
+        log.info(f"Anima attn_mode auto-detected: {best}")
+    elif requested_attn == "xformers":
+        try:
+            import xformers  # noqa: F401
+        except ImportError:
+            best = _detect_best_attn_mode()
+            config["attn_mode"] = best
+            log.warning(
+                f"attn_mode='xformers' requested but xformers is not installed, "
+                f"falling back to '{best}'"
+            )
+    elif requested_attn == "flash":
+        if is_embedded_python() or not flash_attn_stack_usable():
+            best = _detect_best_attn_mode()
+            config["attn_mode"] = best
+            log.warning(
+                f"attn_mode='flash' requested but flash-attn is not available, "
+                f"falling back to '{best}'"
+            )
+
+
 @router.post("/run")
 async def create_toml_file(request: Request):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -126,12 +323,15 @@ async def create_toml_file(request: Request):
 
     config: dict = json.loads(json_data.decode("utf-8"))
     train_utils.fix_config_types(config)
+    normalize_custom_args(config)
 
     gpu_ids = config.pop("gpu_ids", None)
 
     suggest_cpu_threads = 8 if len(train_utils.get_total_images(config["train_data_dir"])) > 200 else 2
     model_train_type = config.pop("model_train_type", "sd-lora")
     trainer_file = trainer_mapping[model_train_type]
+    apply_sdxl_prediction_type(config, model_train_type)
+    apply_anima_training_defaults(config, model_train_type)
 
     if model_train_type != "sdxl-finetune":
         if not train_utils.validate_data_dir(config["train_data_dir"]):
@@ -148,7 +348,7 @@ async def create_toml_file(request: Request):
         config["sample_prompts"] = prompt_file
     else:
         try:
-            positive_prompt, sample_prompts_arg = get_sample_prompts(config=config)
+            positive_prompt, sample_prompts_arg = get_sample_prompts(config=config, model_train_type=model_train_type)
 
             if positive_prompt is not None and train_utils.is_promopt_like(sample_prompts_arg):
                 sample_prompts_file = os.path.join(os.getcwd(), f"config", "autosave", f"{timestamp}-promopt.txt")
@@ -160,6 +360,14 @@ async def create_toml_file(request: Request):
         except ValueError as e:
             log.error(f"Error while processing prompts: {e}")
             return APIResponseFail(message=str(e))
+
+    apply_anima_training_defaults(config, model_train_type)
+    sanitize_config(config)
+
+    if not config.get("sample_prompts"):
+        config.pop("sample_at_first", None)
+        config.pop("sample_every_n_epochs", None)
+        config.pop("sample_every_n_steps", None)
 
     with open(toml_file, "w", encoding="utf-8") as f:
         f.write(toml.dumps(config))
@@ -224,11 +432,18 @@ async def run_interrogate(req: TaggerInterrogateRequest, background_tasks: Backg
 
 @router.get("/pick_file")
 async def pick_file(picker_type: str):
+    if not tkinter_available():
+        return APIResponseFail(
+            message="当前环境未安装 tkinter，无法弹出系统文件夹/文件选择框。"
+            "请手动输入路径；整合包用户请使用已打包 tkinter 的版本或重新运行 build_portable.ps1。"
+        )
     if picker_type == "folder":
         coro = asyncio.to_thread(open_directory_selector, "")
     elif picker_type == "model-file":
         file_types = [("checkpoints", "*.safetensors;*.ckpt;*.pt"), ("all files", "*.*")]
         coro = asyncio.to_thread(open_file_selector, "", "Select file", file_types)
+    else:
+        return APIResponseFail(message=f"不支持的 picker_type: {picker_type}")
 
     result = await coro
     if result == "":
@@ -274,10 +489,13 @@ async def get_files(pick_type) -> APIResponse:
             else:
                 files = [f for f in path.glob("**/*") if f.is_file()]
             for file in files:
+                stat = file.stat()
                 result_list.append({
                     "path": str(file.resolve().absolute()).replace("\\", "/"),
                     "name": file.name,
-                    "size": f"{round(file.stat().st_size / (1024**3),2)} GB"
+                    "size": f"{round(stat.st_size / (1024**3),2)} GB",
+                    "size_bytes": stat.st_size,
+                    "mtime": int(stat.st_mtime),
                 })
         elif file_type == "folder":
             folders = [f for f in path.iterdir() if f.is_dir()]
@@ -363,3 +581,76 @@ async def get_presets() -> APIResponse:
 async def get_saved_params() -> APIResponse:
     saved_params = app_config["saved_params"]
     return APIResponseSuccess(data=saved_params)
+
+
+@router.get("/train/log/stream/{task_id}")
+async def train_log_stream(task_id: str):
+    """
+    Server-Sent Events: live training stdout (one JSON object per event: {text:...} or {done:true}).
+    Open in browser: /train-log?task_id=<uuid>
+    """
+    if task_id not in tm.tasks:
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown task_id. It is only valid for jobs started in this server session (or the run has not been created).",
+        )
+
+    async def event_generator():
+        idx = 0
+        while True:
+            await asyncio.sleep(0.08)
+            chunk, total, done = train_log_hub.snapshot_from(task_id, idx)
+            for line in chunk:
+                yield "data: " + json.dumps({"text": line}, ensure_ascii=False) + "\n\n"
+            idx = total
+            if done:
+                yield "data: " + json.dumps({"done": True}, ensure_ascii=False) + "\n\n"
+                break
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/train/log/tail/{task_id}")
+async def train_log_tail(task_id: str, limit: int = 240):
+    """Recent training stdout lines for the lightweight monitor page."""
+    if task_id not in tm.tasks:
+        raise HTTPException(status_code=404, detail="Unknown task_id")
+
+    limit = max(1, min(limit, 2000))
+    lines, total, done = train_log_hub.snapshot_from(task_id, 0)
+    return APIResponseSuccess(data={
+        "task_id": task_id,
+        "lines": lines[-limit:],
+        "total": total,
+        "done": done,
+    })
+
+
+@router.get("/train/tasks")
+async def list_train_tasks():
+    """Running / known training tasks (for tying UI to task_id)."""
+    return APIResponseSuccess(data={"tasks": tm.dump()})
+
+
+@router.get("/check_update")
+async def check_update():
+    """Non-blocking update check against GitHub Releases."""
+    from mikazuki.update_check import get_cached_result, check_update as do_check
+    result = get_cached_result()
+    if result is None:
+        result = await asyncio.to_thread(do_check)
+    return APIResponseSuccess(data=result)
+
+
+@router.get("/version")
+async def get_version():
+    from mikazuki.update_check import local_version
+    return APIResponseSuccess(data={"version": local_version()})

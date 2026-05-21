@@ -1,5 +1,15 @@
 $Env:HF_HOME = "huggingface"
 
+# Ensure the pinned vendor/sd-scripts submodule (Anima training engine) is
+# present. Safe to run repeatedly; skips silently when not a git checkout.
+if ((Test-Path -Path ".git") -or (Test-Path -Path ".git" -PathType Leaf)) {
+    Write-Output "Syncing git submodules (vendor/sd-scripts)..."
+    git submodule update --init --recursive
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "Warning: submodule init failed; Anima training may not start. Run 'git submodule update --init --recursive' manually."
+    }
+}
+
 if (!(Test-Path -Path "venv")) {
     Write-Output  "Creating venv for python..."
     python -m venv venv
@@ -13,4 +23,6 @@ pip install -U -I --no-deps xformers==0.0.30 --extra-index-url https://download.
 pip install --upgrade -r requirements.txt
 
 Write-Output "Install completed"
+Write-Output ""
+Write-Output "Optional: run install_flash_attn.bat to enable Flash Attention 2 acceleration."
 Read-Host | Out-Null ;

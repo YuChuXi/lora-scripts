@@ -11,7 +11,10 @@ from typing import List
 from pathlib import Path
 from typing import Optional
 
-import pkg_resources
+try:
+    import pkg_resources
+except ImportError:
+    pkg_resources = None
 
 from mikazuki.log import log
 
@@ -50,7 +53,9 @@ def prepare_git():
 
 
 def prepare_submodules():
-    frontend_path = base_dir_path() / "frontend" / "dist"
+    frontend_path = Path(os.environ.get("MIKAZUKI_FRONTEND_DIST", "frontend/dist"))
+    if not frontend_path.is_absolute():
+        frontend_path = base_dir_path() / frontend_path
     tag_editor_path = base_dir_path() / "mikazuki" / "dataset-tag-editor" / "scripts"
 
     if not os.path.exists(frontend_path) or not os.path.exists(tag_editor_path):
@@ -118,6 +123,9 @@ def is_installed(package, friendly: str = None):
     # This function was adapted from code written by vladimandic: https://github.com/vladmandic/automatic/commits/master
     #
 
+    if pkg_resources is None:
+        return False
+
     # Remove brackets and their contents from the line using regular expressions
     # e.g., diffusers[torch]==0.10.2 becomes diffusers==0.10.2
     package = re.sub(r'\[.*?\]', '', package)
@@ -172,6 +180,32 @@ def is_installed(package, friendly: str = None):
         return False
 
 
+def _parse_env_marker(line: str):
+    """Split a PEP 508 requirement into (spec, marker_matches).
+
+    Returns (package_spec, True/False) where marker_matches indicates
+    whether the environment marker (if any) matches the current platform.
+    """
+    if ";" not in line:
+        return line, True
+    spec, marker = line.split(";", 1)
+    spec = spec.strip()
+    marker = marker.strip()
+    try:
+        from packaging.markers import Marker
+        return spec, Marker(marker).evaluate()
+    except ImportError:
+        pass
+    if "sys_platform" in marker:
+        if 'win32' in marker:
+            return spec, sys.platform == "win32"
+        if 'linux' in marker:
+            return spec, sys.platform == "linux"
+        if 'darwin' in marker:
+            return spec, sys.platform == "darwin"
+    return spec, True
+
+
 def validate_requirements(requirements_file: str):
     with open(requirements_file, 'r', encoding='utf8') as f:
         lines = [
@@ -190,11 +224,15 @@ def validate_requirements(requirements_file: str):
                 index_url = line.replace("--index-url ", "")
                 continue
 
-            if not is_installed(line):
+            spec, marker_matches = _parse_env_marker(line)
+            if not marker_matches:
+                continue
+
+            if not is_installed(spec):
                 if index_url != "":
-                    run_pip(f"install {line} --index-url {index_url}", line, live=True)
+                    run_pip(f"install \"{spec}\" --index-url {index_url}", spec, live=True)
                 else:
-                    run_pip(f"install {line}", line, live=True)
+                    run_pip(f"install \"{spec}\"", spec, live=True)
 
 
 def setup_windows_bitsandbytes():
@@ -203,10 +241,19 @@ def setup_windows_bitsandbytes():
 
     # bnb_windows_index = os.environ.get("BNB_WINDOWS_INDEX", "https://jihulab.com/api/v4/projects/140618/packages/pypi/simple")
     bnb_package = "bitsandbytes==0.46.0"
-    bnb_path = os.path.join(sysconfig.get_paths()["purelib"], "bitsandbytes")
-
     installed_bnb = is_installed("bitsandbytes")  # don't check version here
-    bnb_cuda_setup = len([f for f in os.listdir(bnb_path) if re.findall(r"libbitsandbytes_cuda.+?\.dll", f)]) != 0
+
+    try:
+        import importlib
+        bnb_spec = importlib.util.find_spec("bitsandbytes")
+        bnb_path = os.path.dirname(bnb_spec.origin) if bnb_spec and bnb_spec.origin else os.path.join(sysconfig.get_paths()["purelib"], "bitsandbytes")
+    except Exception:
+        bnb_path = os.path.join(sysconfig.get_paths()["purelib"], "bitsandbytes")
+
+    if not os.path.isdir(bnb_path):
+        bnb_cuda_setup = False
+    else:
+        bnb_cuda_setup = len([f for f in os.listdir(bnb_path) if re.findall(r"libbitsandbytes_cuda.+?\.dll", f)]) != 0
 
     if not installed_bnb or not bnb_cuda_setup:
         log.error("detected wrong install of bitsandbytes, reinstall it")
@@ -323,9 +370,11 @@ def catch_exception(f):
 
 
 def check_port_avaliable(port: int):
+    # Do not use SO_REUSEADDR here. On Windows it can report a port as
+    # available even when another process has a more specific local bind
+    # (for example 127.0.0.1:6008), which makes the browser hit the wrong app.
     try:
         s = socket.socket()
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", port))
         s.close()
         return True

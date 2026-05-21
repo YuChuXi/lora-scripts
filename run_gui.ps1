@@ -1,17 +1,19 @@
-$Env:HF_HOME = "huggingface"
-$Env:PYTHONUTF8 = "1"
+# Prefer run_gui.bat on Windows (avoids execution policy issues).
+# If you must run PowerShell directly, this wrapper dispatches to source/portable launchers.
 
-if (Test-Path -Path "venv\Scripts\activate") {
-    Write-Host -ForegroundColor green "Activating virtual environment..."
-    .\venv\Scripts\activate
-}
-elseif (Test-Path -Path "python\python.exe") {
-    Write-Host -ForegroundColor green "Using python from python folder..."
-    $py_path = (Get-Item "python").FullName
-    $env:PATH = "$py_path;$env:PATH"
-}
-else {
-    Write-Host -ForegroundColor Blue "No virtual environment found, using system python..."
+Set-Location -LiteralPath $PSScriptRoot
+
+if ((Test-Path -LiteralPath "python_embeded\python.exe") -and
+    (Test-Path -LiteralPath "SD-Trainer\gui.py") -and
+    (Test-Path -LiteralPath "run_gui_portable.bat")) {
+    & ".\run_gui_portable.bat" @args
+    exit $LASTEXITCODE
 }
 
-python gui.py
+if (Test-Path -LiteralPath "run_gui_source.ps1") {
+    & ".\run_gui_source.ps1" @args
+    exit $LASTEXITCODE
+}
+
+Write-Host -ForegroundColor Red "[ERROR] No launcher found. Please make sure the package is fully extracted."
+exit 1
