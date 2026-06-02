@@ -4,6 +4,104 @@
 
 ---
 
+## v2.7.0 — 2026-05-28
+
+### Anima LoRA Fast 模式（可选插件）
+
+- **训练入口**：WebUI 侧栏「Anima LoRA → Fast 模式」（`/lora/anima-fast.html`），`model_train_type: anima-lora-fast` 路由至 `extensions/anima_lora/` 独立 venv 与 `train.py`。
+- **页内安装器**：一键克隆/快照上游 [sorryhyun/anima_lora](https://github.com/sorryhyun/anima_lora)（MIT），创建 cu130 插件环境；未就绪时拒绝开训。
+- **训练监控**：Loss / ETA / Epoch 与 Fast 专用 `*.progress.jsonl` 同步；预览图按活动任务 `output_dir` 发现。
+- **文档与对标**：[`docs/anima-fast.md`](docs/anima-fast.md)、[`docs/examples/anima-lora-benchmark-*.toml`](docs/examples/)；4090 同参约 **2.5×** 加速（标准 Kohya ≈7.1 s/step vs Fast ≈2.8 s/step）。
+- **归属**：[`NOTICE.md`](NOTICE.md) § Anima LoRA Fast Mode；Fast 页与文档致谢 upstream。
+
+### 前端（dist）
+
+- Fast 页安装引导、开源致谢（`anima-fast-credit`）；首页/更新日志 v2.7.0 条目。
+
+### 整合包说明
+
+- **不预装** Fast 插件 venv（`extensions/anima_lora/.venv`）；用户首次在 Fast 页点击「开启插件」安装，避免 7z 体积暴增。
+
+### 环境变量
+
+- `LORA_ENABLE_ANIMA_FAST=1`（默认开启 Fast 入口；设为 `0` 可隐藏侧栏与 API）。
+
+---
+
+## v2.6.0 — 2026-05-28
+
+### Anima 全量微调（Finetune）
+
+- **训练入口**：WebUI 侧栏「全量微调 → Anima Finetune」（`/lora/anima-finetune.html`），`model_train_type: anima-finetune` 路由至 `scripts/dev/anima_train.py`（上游 `anima_train.py`）。
+- **Schema 与适配**：新增 `mikazuki/schema/anima-finetune.ts`；`adapt_anima_config(finetune=True)` 剥离 LoRA 网络字段；默认学习率 `1e-5`。
+- **导航与首页**：「全量微调」分组（Anima Finetune 在 Stable Diffusion / Dreambooth 之前）；首页 portal、新手上路引导同步。
+- **训练监控**：识别 `anima_train.py` 时显示 **Anima Finetune**（不再误标为 Anima LoRA）。
+- **文档与示例**：`docs/anima-backend.md`、`docs/examples/anima-full-finetune.toml`；单元测试覆盖路由、wrapper、adapter、监控类型推断。
+
+### 前端（dist）
+
+- 修复 SPA 页面组件 `i0` 映射缺失导致的右栏 **404 Not Found**。
+- Anima Finetune 页右栏标语与说明文案（进阶玩家、充足样本与高显存）。
+
+### 实测参考
+
+- RTX 4090 24GB、1024 分辨率：全量微调专用显存约 **23–24 GB**（与 LoRA 的 12 GB 档不同，需单独规划显存）。
+
+---
+
+## v2.5.3 — 2026-05-27
+
+### 整合包热修复（[#54](https://github.com/wochenlong/lora-scripts-next/issues/54)）
+
+- **依赖健康检查**：便携启动不再仅以 `torch` 目录是否存在判断「已安装」；启动前会探测 `torch`、`torchvision`、`accelerate`、`diffusers`、`gradio` 等关键包，不完整时自动执行 `setup_environment.py` 修复安装，缓解「网页能开、点开始训练提示无法连接训练端」。
+- **侧栏版本号**：WebUI 侧栏「Next Trainer」旁显示当前版本（读取 `/api/version`），便于确认是否已升级到 2.5.3。
+
+### 升级说明
+
+- **v2.5.2 整合包用户请整包升级到 v2.5.3**（不要覆盖 `sd-models/`、`output/`、`config/` 等用户目录）。详见 [`docs/portable-upgrade-2.5.2-to-2.5.3.md`](docs/portable-upgrade-2.5.2-to-2.5.3.md)。
+
+---
+
+## v2.5.2 — 2026-05-25
+
+### 整合包修复
+
+- **Git 更新可靠性**：`Update-SD-Trainer.bat` 对浅克隆仓库会自动 `--deepen=50` 补齐历史，避免新版整合包更新时报 `fast-forward update failed`。
+- **GitHub 网络回退**：主仓 fetch 与 `dataset-tag-editor` 子模块更新均支持直连、`ghfast.top`、`ghproxy`、`gitmirror` 多路回退，缓解国内网络 `Connection was reset`。
+- **子模块容错**：整合包已内置 `dataset-tag-editor` 文件时，更新脚本会直接复用已有文件，避免 Git 因“目录已存在且非空”导致子模块 clone 失败。
+- **启动脚本路径修复**：修复 `launch_portable.bat` 与 `sync_portable_root_launchers.bat` 相对路径层级错误，确保根目录 `run_gui.bat`、`run_gui_portable.bat` 能被正确刷新。
+- **PyTorch 下载源测速**：首次安装依赖时改为按实际 wheel 下载吞吐量（最多 32MB / 15 秒）选择 PyTorch 源，避免直连快的用户被误切到慢速国内镜像。
+- **tkinter 打包说明**：明确整合包需要完整 CPython 3.10 的 Tcl/Tk 文件，避免文件/目录选择器不可用。
+
+### 训练稳定性
+
+- **SDXL 训练签名兼容**：同步 `assert_extra_args` 参数签名，修复新版 `sd-scripts` 下 SDXL LoRA / Textual Inversion 训练启动时报 `TypeError`。
+- **Windows torch_compile 保护**：Windows 上自动禁用 `torch_compile` / `dynamo_backend`，避免 PyTorch 编译路径依赖 Triton 导致训练中断。
+
+### 标签编辑器
+
+- **默认可用性恢复**：源码和整合包用户默认启用原生标签编辑器入口。
+- **启动自修复**：标签编辑器缺失时会尝试自动初始化子模块；嵌入式 Python 环境下通过 bootstrap 修复 `sys.path`，避免 `/proxy/tageditor` 404。
+
+---
+
+## v2.5.0 — 2026-05-21
+
+### UI 焕新
+
+- **侧栏导航重构**：新增分组式侧栏，训练类型（LoRA / Dreambooth）、工具（Tensorboard / 数据集打标 / 标签编辑）、帮助文档等分区清晰，支持层级折叠。
+- **首页传送门**：新增 Next Trainer 首页，卡片式入口快速跳转到训练、监控、新手上路等常用功能。
+- **训练监控仪表盘**：新增 GPU 实时指标（型号、负载、显存、温度、功耗），总步数大字卡片，训练参数速查（学习率、优化器、调度器、Rank/Alpha、分辨率、精度）。
+- **新手上路页面**：新增指南页，帮助新用户快速了解训练流程。
+- **CSS 去重清理**：清理 PR 合并产生的 7 倍重复 CSS 规则（~1660 行），`sd-trainer-ui-polish.css` 和 `style.css` 均已精简。
+- **README 截图更新**：替换为最新 UI 截图（WebUI 三栏布局、训练监控仪表盘、Loss 曲线 + 预览图、训练日志）。
+
+### 改进
+
+- **训练监控前后端分离**：`train_status_server.py` 拆分为 `train_monitor/` 目录（`server.py` + `index.html` + `monitor.css` + `monitor.js`），便于独立维护和迭代。
+
+---
+
 ## v2.4.0 — 2026-05-21
 
 ### 训练稳定性（整合包 + 源码）

@@ -12,18 +12,51 @@ from datetime import datetime
 from pathlib import Path
 from typing import Tuple, Optional
 
-import toml
+try:
+    import toml
+except ModuleNotFoundError:  # pragma: no cover - lightweight test environment fallback
+    import tomllib
+
+    class _TomlFallback:
+        @staticmethod
+        def loads(content: str):
+            return tomllib.loads(content)
+
+        @staticmethod
+        def dumps(data: dict):
+            from mikazuki.anima_fast_backend.adapter import dump_flat_toml
+            return dump_flat_toml(data)
+
+    toml = _TomlFallback()
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 import mikazuki.process as process
 from mikazuki import launch_utils
+from mikazuki.anima_fast_backend import TRAIN_TYPE as ANIMA_FAST_TRAIN_TYPE
+from mikazuki.anima_fast_backend.adapter import AdapterError, adapt_config, dump_flat_toml
+from mikazuki.anima_fast_backend.extension_state import (
+    STATE_INSTALLED_UNVERIFIED,
+    STATE_READY,
+    default_layout,
+    read_extension_status,
+    write_install_state,
+)
+from mikazuki.anima_fast_backend.environment import audit_environment, start_install_task
+from mikazuki.anima_fast_backend.installer import build_install_plan, copy_source_snapshot, remove_extension
+from mikazuki.anima_fast_backend.preflight import run_preflight
+from mikazuki.anima_fast_backend.preview import apply_anima_fast_preview
+from mikazuki.anima_fast_backend.preprocess import prepare_anima_fast_dataset, user_left_resized_empty
+from mikazuki.anima_fast_backend.settings import discover_runtime, feature_enabled
 from mikazuki.app.config import app_config
 from mikazuki.app.models import (APIResponse, APIResponseFail,
-                                 APIResponseSuccess, TaggerInterrogateRequest)
+                                 APIResponseSuccess, TaggerInterrogateRequest,
+                                 TaggerPrefetchRequest)
+from mikazuki.dataset_editor import router as dataset_editor_router
 from mikazuki.log import log
-from mikazuki.tagger.interrogator import (available_interrogators,
-                                          on_interrogate)
+from mikazuki.tagger.interrogator import available_interrogators
+from mikazuki.tagger.jobs import run_interrogate_job, run_prefetch_job
+from mikazuki.tagger.progress import tagger_progress
 from mikazuki.tasks import tm
 from mikazuki.train_log_hub import hub as train_log_hub
 from mikazuki.utils import train_utils
@@ -34,8 +67,10 @@ from mikazuki.utils.tk_window import (open_directory_selector,
                                       tkinter_available)
 
 router = APIRouter()
+router.include_router(dataset_editor_router)
 
-ANIMA_TRAIN_TYPES = {"anima-lora", "sd3-lora"}
+ANIMA_TRAIN_TYPES = {"anima-lora", "sd3-lora", "anima-finetune"}
+ANIMA_FINETUNE_TYPE = "anima-finetune"
 ANIMA_DEFAULT_SAMPLE_POSITIVE = (
     "1girl, solo, smile, japanese clothes, kimono, blue eyes, closed mouth, upper body, looki"
     "ng at viewer, hair ornament, long hair, yellow kimono, black hair, anime coloring, yukat"
@@ -49,6 +84,7 @@ ANIMA_DEFAULT_SAMPLE_NEGATIVE = (
 )
 ANIMA_DEFAULT_UNET_LR = 5e-5
 ANIMA_LEGACY_UNET_LR = {"0.0001", "1e-4", "1E-4"}
+ANIMA_FULL_PRECISION_UNSAFE_OPTIMIZERS = {"automagic", "pytorch_optimizer.came"}
 
 avaliable_scripts = [
     "networks/extract_lora_from_models.py",
@@ -69,6 +105,7 @@ trainer_mapping = {
 
     "sd3-lora": "./scripts/dev/anima_train_network.py",
     "anima-lora": "./scripts/dev/anima_train_network.py",
+    "anima-finetune": "./scripts/dev/anima_train.py",
     "flux-lora": "./scripts/dev/flux_train_network.py",
     "flux-finetune": "./scripts/dev/flux_train.py",
 }
@@ -146,6 +183,15 @@ _PATH_FIELDS = {
 
 def sanitize_config(config: dict) -> None:
     """Remove all invalid/empty values from config before writing TOML."""
+    if sys.platform == "win32" and config.get("torch_compile"):
+        log.warning(
+            "torch_compile is not supported on Windows (requires Triton, Linux-only). "
+            "Automatically disabled. / "
+            "torch_compile 在 Windows 上不可用（需要仅限 Linux 的 Triton 库），已自动关闭。"
+        )
+        config.pop("torch_compile", None)
+        config.pop("dynamo_backend", None)
+
     keys_to_remove = [k for k, v in config.items() if _is_invalid_value(v)]
     for k in keys_to_remove:
         del config[k]
@@ -161,16 +207,17 @@ async def load_schemas():
     avaliable_schemas.clear()
 
     schema_dir = os.path.join(os.getcwd(), "mikazuki", "schema")
-    schemas = os.listdir(schema_dir)
+    schemas = sorted(os.listdir(schema_dir), key=lambda name: (os.path.splitext(name)[0] != "shared", name))
 
     def lambda_hash(x):
         return hashlib.md5(x.encode()).hexdigest()
 
     for schema_name in schemas:
+        schema_id = os.path.splitext(schema_name)[0]
         with open(os.path.join(schema_dir, schema_name), encoding="utf-8") as f:
             content = f.read()
             avaliable_schemas.append({
-                "name": schema_name.rstrip(".ts"),
+                "name": schema_id,
                 "schema": content,
                 "hash": lambda_hash(content)
             })
@@ -272,11 +319,29 @@ def _detect_best_attn_mode() -> str:
     return "torch"
 
 
+def _cuda_bf16_supported() -> bool:
+    try:
+        import torch
+        return bool(torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+    except Exception:
+        return False
+
+
 def apply_anima_training_defaults(config: dict, model_train_type: str):
     if model_train_type not in ANIMA_TRAIN_TYPES:
         return
 
-    if str(config.get("unet_lr", "")).strip() in ANIMA_LEGACY_UNET_LR:
+    if model_train_type == ANIMA_FINETUNE_TYPE:
+        lr = str(config.get("learning_rate", "")).strip()
+        if not lr or lr in ANIMA_LEGACY_UNET_LR:
+            unet_lr = str(config.get("unet_lr", "")).strip()
+            if unet_lr and unet_lr not in ANIMA_LEGACY_UNET_LR:
+                config["learning_rate"] = unet_lr
+            else:
+                config["learning_rate"] = "1e-5"
+        config.pop("unet_lr", None)
+        config.pop("text_encoder_lr", None)
+    elif str(config.get("unet_lr", "")).strip() in ANIMA_LEGACY_UNET_LR:
         config["unet_lr"] = ANIMA_DEFAULT_UNET_LR
     elif isinstance(config.get("unet_lr"), str):
         config["unet_lr"] = float(config["unet_lr"])
@@ -284,11 +349,25 @@ def apply_anima_training_defaults(config: dict, model_train_type: str):
     if is_preview_enabled(config) or config.get("sample_prompts"):
         config["sample_at_first"] = True
 
-    mixed = config.get("mixed_precision", "")
-    if mixed == "bf16" and not config.get("full_bf16"):
-        config["full_bf16"] = True
-    elif mixed == "fp16" and not config.get("full_fp16"):
-        config["full_fp16"] = True
+    optimizer_type = str(config.get("optimizer_type", "")).strip().lower()
+    if optimizer_type in ANIMA_FULL_PRECISION_UNSAFE_OPTIMIZERS:
+        if config.get("mixed_precision") == "fp16" and _cuda_bf16_supported():
+            config["mixed_precision"] = "bf16"
+            log.warning(
+                "Changed Anima mixed_precision from fp16 to bf16 for optimizer "
+                f"{config.get('optimizer_type')}. fp16 is more likely to produce loss=nan."
+            )
+
+        disabled = []
+        for key in ("full_bf16", "full_fp16"):
+            if config.pop(key, None):
+                disabled.append(key)
+        if disabled:
+            log.warning(
+                "Disabled Anima full half-precision training for optimizer "
+                f"{config.get('optimizer_type')} ({', '.join(disabled)}). "
+                "This keeps trainable LoRA weights in fp32 to reduce loss=nan risk."
+            )
 
     requested_attn = config.get("attn_mode", "")
     if not requested_attn:
@@ -315,10 +394,73 @@ def apply_anima_training_defaults(config: dict, model_train_type: str):
             )
 
 
+def _anima_fast_runtime():
+    return discover_runtime(lora_next_root=Path.cwd())
+
+
+def _anima_fast_disabled_response():
+    return APIResponseFail(
+        message="Anima Fast plugin is temporarily disabled by maintainer (LORA_ENABLE_ANIMA_FAST=0)."
+    )
+
+
+def _write_anima_fast_toml(config: dict, timestamp: str, autosave_dir: str) -> tuple[Path, dict, list[str]]:
+    runtime = _anima_fast_runtime()
+    run_id = f"{timestamp}-anima-fast"
+    preview_warnings = apply_anima_fast_preview(config, autosave_dir, run_id)
+    adapted = adapt_config(config, runtime, run_id)
+    warnings = list(adapted.warnings) + preview_warnings
+    if user_left_resized_empty(config):
+        warnings.append(
+            "resized_image_dir 未填写；开始训练时将自动 resize 到 "
+            ".cache/anima_fast/<train_data_dir 相对路径>/resized（同一数据集可复用）"
+        )
+    return _write_adapted_anima_fast_toml(adapted.values, warnings, run_id, autosave_dir)
+
+
+def _write_adapted_anima_fast_toml(values: dict, warnings: list[str], run_id: str, autosave_dir: str) -> tuple[Path, dict, list[str]]:
+    toml_file = Path(autosave_dir) / f"{run_id}.toml"
+    toml_file.write_text(dump_flat_toml(values), encoding="utf-8")
+    return toml_file, values, warnings
+
+
+def _anima_fast_fail_from_preflight(result):
+    return APIResponseFail(
+        message="Anima Fast preflight failed / Anima Fast 预检查失败",
+        data=result.as_dict(),
+    )
+
+
+def _anima_fast_ready_gate():
+    layout = default_layout(Path.cwd())
+    status = read_extension_status(layout)
+    if status.state != STATE_READY:
+        return False, APIResponseFail(
+            message="Anima Fast extension is not ready. Install or repair the extension first.",
+            data=status.as_dict(),
+        )
+    audit = (status.facts or {}).get("audit", {})
+    if not audit.get("ok"):
+        return False, APIResponseFail(
+            message="Anima Fast environment audit has not passed. Repair the extension before training.",
+            data=status.as_dict(),
+        )
+    audit_result = audit_environment(Path.cwd(), layout, main_python=Path(sys.executable), require_cuda=True)
+    if not audit_result.ok:
+        write_install_state(layout, "broken", {"audit": audit_result.as_dict()}, "; ".join(audit_result.errors))
+        return False, APIResponseFail(
+            message="Anima Fast environment drift detected. Repair the extension before training.",
+            data=audit_result.as_dict(),
+        )
+    return True, None
+
+
 @router.post("/run")
 async def create_toml_file(request: Request):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    toml_file = os.path.join(os.getcwd(), f"config", "autosave", f"{timestamp}.toml")
+    autosave_dir = os.path.join(os.getcwd(), "config", "autosave")
+    os.makedirs(autosave_dir, exist_ok=True)
+    toml_file = os.path.join(autosave_dir, f"{timestamp}.toml")
     json_data = await request.body()
 
     config: dict = json.loads(json_data.decode("utf-8"))
@@ -327,8 +469,41 @@ async def create_toml_file(request: Request):
 
     gpu_ids = config.pop("gpu_ids", None)
 
-    suggest_cpu_threads = 8 if len(train_utils.get_total_images(config["train_data_dir"])) > 200 else 2
     model_train_type = config.pop("model_train_type", "sd-lora")
+    if model_train_type == ANIMA_FAST_TRAIN_TYPE:
+        if not feature_enabled():
+            return _anima_fast_disabled_response()
+        ready, failure = _anima_fast_ready_gate()
+        if not ready:
+            return failure
+        try:
+            runtime = _anima_fast_runtime()
+            run_id = f"{timestamp}-anima-fast"
+            preview_warnings = apply_anima_fast_preview(config, autosave_dir, run_id)
+            prepared = prepare_anima_fast_dataset(config, runtime, run_id)
+            adapted = prepared.adapted
+            preflight = run_preflight(adapted.values, runtime)
+            if not preflight.ok:
+                return _anima_fast_fail_from_preflight(preflight)
+            toml_file, adapted_values, warnings = _write_adapted_anima_fast_toml(
+                adapted.values, [*adapted.warnings, *preview_warnings, *preflight.warnings], run_id, autosave_dir
+            )
+            metadata = {
+                "progress_jsonl": adapted_values.get("progress_jsonl"),
+                "output_dir": adapted_values.get("output_dir"),
+                "output_name": adapted_values.get("output_name"),
+                "logging_dir": adapted_values.get("logging_dir"),
+                "warnings": warnings,
+                "auto_resized": prepared.auto_resized,
+            }
+            return process.run_anima_fast_train(str(toml_file), runtime, gpu_ids, metadata=metadata)
+        except AdapterError as exc:
+            return APIResponseFail(message=str(exc))
+        except Exception as exc:  # noqa: BLE001 - keep API failures structured
+            log.error(f"Anima Fast launch failed: {exc}")
+            return APIResponseFail(message=f"Anima Fast launch failed: {exc}")
+
+    suggest_cpu_threads = 8 if len(train_utils.get_total_images(config["train_data_dir"])) > 200 else 2
     trainer_file = trainer_mapping[model_train_type]
     apply_sdxl_prediction_type(config, model_train_type)
     apply_anima_training_defaults(config, model_train_type)
@@ -351,7 +526,7 @@ async def create_toml_file(request: Request):
             positive_prompt, sample_prompts_arg = get_sample_prompts(config=config, model_train_type=model_train_type)
 
             if positive_prompt is not None and train_utils.is_promopt_like(sample_prompts_arg):
-                sample_prompts_file = os.path.join(os.getcwd(), f"config", "autosave", f"{timestamp}-promopt.txt")
+                sample_prompts_file = os.path.join(autosave_dir, f"{timestamp}-promopt.txt")
                 with open(sample_prompts_file, "w", encoding="utf-8") as f:
                     f.write(sample_prompts_arg)
                 config["sample_prompts"] = sample_prompts_file
@@ -377,6 +552,116 @@ async def create_toml_file(request: Request):
     return result
 
 
+@router.get("/plugins/anima-lora/status")
+async def anima_lora_plugin_status():
+    layout = default_layout(Path.cwd())
+    status = read_extension_status(layout).as_dict()
+    runtime = _anima_fast_runtime()
+    runtime_available = runtime.python.is_file() and (runtime.anima_root / "train.py").is_file()
+    status["feature_enabled"] = feature_enabled()
+    status["runtime"] = {
+        "anima_root": str(runtime.anima_root),
+        "source_commit": runtime.source_commit,
+        "python": str(runtime.python),
+        "output_dir": str(runtime.output_dir),
+        "logging_dir": str(runtime.logging_dir),
+        "cache_dir": str(runtime.cache_dir),
+        "external_runtime_exists": runtime_available,
+    }
+    return APIResponseSuccess(data=status)
+
+
+@router.post("/plugins/anima-lora/preflight")
+async def anima_lora_plugin_preflight(request: Request):
+    config: dict = json.loads((await request.body()).decode("utf-8") or "{}")
+    runtime = _anima_fast_runtime()
+    autosave_dir = os.path.join(os.getcwd(), "config", "autosave")
+    os.makedirs(autosave_dir, exist_ok=True)
+    run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-anima-fast"
+    try:
+        preview_warnings = apply_anima_fast_preview(config, autosave_dir, run_id)
+        adapted = adapt_config(config, runtime, run_id)
+    except AdapterError as exc:
+        return APIResponseFail(message=str(exc))
+    result = run_preflight(adapted.values, runtime)
+    result.warnings = [*preview_warnings, *result.warnings]
+    if result.ok:
+        return APIResponseSuccess(data=result.as_dict())
+    return _anima_fast_fail_from_preflight(result)
+
+
+@router.post("/plugins/anima-lora/dry-run")
+async def anima_lora_plugin_dry_run(request: Request):
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    autosave_dir = os.path.join(os.getcwd(), "config", "autosave")
+    os.makedirs(autosave_dir, exist_ok=True)
+    config: dict = json.loads((await request.body()).decode("utf-8") or "{}")
+    config.pop("gpu_ids", None)
+    config.pop("model_train_type", None)
+    try:
+        toml_file, adapted_values, warnings = _write_anima_fast_toml(config, timestamp, autosave_dir)
+    except AdapterError as exc:
+        return APIResponseFail(message=str(exc))
+    return APIResponseSuccess(data={
+        "toml_path": str(toml_file),
+        "config": adapted_values,
+        "warnings": warnings,
+    })
+
+
+@router.post("/plugins/anima-lora/install")
+async def anima_lora_plugin_install(request: Request):
+    if not feature_enabled():
+        return _anima_fast_disabled_response()
+    payload: dict = json.loads((await request.body()).decode("utf-8") or "{}")
+    source_root = Path(payload.get("source_root") or os.environ.get("ANIMA_LORA_ROOT") or (Path.cwd().parent / "anima_lora"))
+    runtime = _anima_fast_runtime()
+    source_commit = str(payload.get("source_commit") or runtime.source_commit or "").strip() or None
+    dry_run = payload.get("dry_run", True) is not False
+    layout = default_layout(Path.cwd())
+    plan = build_install_plan(source_root, layout, dry_run=dry_run, source_commit=source_commit)
+    data = {"plan": plan.as_dict()}
+    if dry_run:
+        data["message"] = "Installer dry-run completed"
+        return APIResponseSuccess(data=data)
+    try:
+        task_id, install_data = start_install_task(Path.cwd(), layout, source_root, dry_run=False, source_commit=source_commit)
+    except Exception as exc:
+        write_install_state(layout, "broken", {"plan": plan.as_dict()}, str(exc))
+        return APIResponseFail(message=f"Anima LoRA install failed: {exc}")
+    data.update(install_data)
+    data["status"] = read_extension_status(layout).as_dict()
+    data["message"] = "Anima LoRA install task started"
+    return APIResponseSuccess(data=data)
+
+
+@router.post("/plugins/anima-lora/repair")
+async def anima_lora_plugin_repair(request: Request):
+    return await anima_lora_plugin_install(request)
+
+
+@router.post("/plugins/anima-lora/uninstall")
+async def anima_lora_plugin_uninstall():
+    if not feature_enabled():
+        return _anima_fast_disabled_response()
+    layout = default_layout(Path.cwd())
+    try:
+        remove_extension(layout, Path.cwd())
+    except Exception as exc:
+        return APIResponseFail(message=f"Anima LoRA uninstall failed: {exc}")
+    return APIResponseSuccess(data={"status": read_extension_status(layout).as_dict()})
+
+
+@router.post("/anima-fast/preflight")
+async def anima_fast_preflight_compat(request: Request):
+    return await anima_lora_plugin_preflight(request)
+
+
+@router.post("/anima-fast/dry-run")
+async def anima_fast_dry_run_compat(request: Request):
+    return await anima_lora_plugin_dry_run(request)
+
+
 @router.post("/run_script")
 async def run_script(request: Request, background_tasks: BackgroundTasks):
     paras = await request.body()
@@ -400,34 +685,56 @@ async def run_script(request: Request, background_tasks: BackgroundTasks):
     return APIResponseSuccess()
 
 
+@router.get("/tagger/status")
+async def tagger_status():
+    return APIResponseSuccess(data=tagger_progress.get())
+
+
+@router.get("/tagger/download-status")
+async def tagger_download_status():
+    snap = tagger_progress.get()
+    return APIResponseSuccess(data={
+        "phase": snap.get("phase"),
+        "model": snap.get("model"),
+        "download": snap.get("download"),
+        "message": snap.get("message"),
+        "error": snap.get("error"),
+    })
+
+
+@router.post("/tagger/cancel")
+async def tagger_cancel():
+    if not tagger_progress.request_cancel():
+        return APIResponseSuccess(message="当前无运行中的任务")
+    return APIResponseSuccess(message="正在中止任务…")
+
+
+@router.post("/tagger/reset")
+async def tagger_reset():
+    if tagger_progress.is_busy():
+        tagger_progress.request_cancel()
+    tagger_progress.reset_idle("配置参数后点击启动")
+    return APIResponseSuccess(message="已重置打标状态")
+
+
+@router.post("/tagger/prefetch")
+async def tagger_prefetch(req: TaggerPrefetchRequest, background_tasks: BackgroundTasks):
+    if req.interrogator_model not in available_interrogators:
+        return APIResponseFail(message=f"未知模型: {req.interrogator_model}")
+    if tagger_progress.is_busy():
+        return APIResponseFail(message="已有打标或下载任务进行中")
+    background_tasks.add_task(run_prefetch_job, req)
+    return APIResponseSuccess(message="模型下载已开始")
+
+
 @router.post("/interrogate")
 async def run_interrogate(req: TaggerInterrogateRequest, background_tasks: BackgroundTasks):
-    interrogator = available_interrogators.get(req.interrogator_model, available_interrogators["wd14-convnextv2-v2"])
-    background_tasks.add_task(
-        on_interrogate,
-        image=None,
-        batch_input_glob=req.path,
-        batch_input_recursive=req.batch_input_recursive,
-        batch_output_dir="",
-        batch_output_filename_format="[name].[output_extension]",
-        batch_output_action_on_conflict=req.batch_output_action_on_conflict,
-        batch_remove_duplicated_tag=True,
-        batch_output_save_json=False,
-        interrogator=interrogator,
-        threshold=req.threshold,
-        character_threshold=req.character_threshold,
-        add_rating_tag=req.add_rating_tag,
-        add_model_tag=req.add_model_tag,
-        additional_tags=req.additional_tags,
-        exclude_tags=req.exclude_tags,
-        sort_by_alphabetical_order=False,
-        add_confident_as_weight=False,
-        replace_underscore=req.replace_underscore,
-        replace_underscore_excludes=req.replace_underscore_excludes,
-        escape_tag=req.escape_tag,
-        unload_model_after_running=True
-    )
-    return APIResponseSuccess()
+    if req.interrogator_model not in available_interrogators:
+        return APIResponseFail(message=f"未知模型: {req.interrogator_model}")
+    if tagger_progress.is_busy():
+        return APIResponseFail(message="已有打标或下载任务进行中")
+    background_tasks.add_task(run_interrogate_job, req)
+    return APIResponseSuccess(message="打标任务已提交")
 
 
 @router.get("/pick_file")
@@ -616,6 +923,12 @@ async def train_log_stream(task_id: str):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/plugins/anima-lora/install/log/stream/{task_id}")
+async def anima_lora_install_log_stream(task_id: str):
+    """Compatibility alias for plugin install/train task stdout streams."""
+    return await train_log_stream(task_id)
 
 
 @router.get("/train/log/tail/{task_id}")

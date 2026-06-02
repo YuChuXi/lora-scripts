@@ -1,6 +1,7 @@
 import asyncio
 import mimetypes
 import os
+import re
 import sys
 import webbrowser
 from contextlib import asynccontextmanager
@@ -8,7 +9,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
@@ -136,9 +137,36 @@ if cors_config != "":
 
 
 @app.middleware("http")
+async def redirect_vuepress_md_to_html(request, call_next):
+    """VuePress sidebar links use *.md; vendored dist only ships *.html."""
+    path = request.url.path
+    if request.method == "GET" and path.endswith(".md"):
+        html_path = f"{path[:-3]}.html"
+        rel = html_path.lstrip("/")
+        if (_FRONTEND_DIST / rel).is_file():
+            query = request.url.query
+            target = f"{html_path}?{query}" if query else html_path
+            return RedirectResponse(url=target, status_code=302)
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def add_cache_control_header(request, call_next):
     response = await call_next(request)
-    response.headers["Cache-Control"] = "max-age=0"
+    path = request.url.path
+    if (
+        path.endswith(".html")
+        or path.endswith("/assets/tagger-progress.js")
+        or path.endswith("/assets/sd-trainer-brand.js")
+        or path.endswith("/assets/dataset-editor.js")
+        or path.endswith("/assets/dataset-editor.css")
+        or path.endswith("/assets/dataset-editor-entry.js")
+    ):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    elif re.search(r"\.[a-f0-9]{8}\.(js|css|webp)$", path):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        response.headers["Cache-Control"] = "max-age=0"
     return response
 
 app.include_router(api_router, prefix="/api")
@@ -153,6 +181,25 @@ async def train_log_viewer():
     if not _TRAIN_LOG_HTML.is_file():
         raise HTTPException(status_code=404, detail="train_log.html not found")
     return FileResponse(str(_TRAIN_LOG_HTML))
+
+
+@app.get("/train-monitor")
+async def train_monitor_redirect():
+    """Open the lightweight monitor on the actual runtime port."""
+    monitor_port = os.environ.get("TRAIN_MONITOR_PORT", "6008")
+    return RedirectResponse(url=f"http://127.0.0.1:{monitor_port}", status_code=302)
+
+
+@app.get("/lora/sdxl.html")
+async def lora_sdxl_redirect():
+    """Legacy SDXL page → unified Stable Diffusion (master) entry."""
+    return RedirectResponse(url="/lora/master.html", status_code=302)
+
+
+@app.get("/lora/anima-fast")
+async def lora_anima_fast_redirect():
+    """VuePress alias without .html → static dist page."""
+    return RedirectResponse(url="/lora/anima-fast.html", status_code=302)
 
 
 @app.get("/")

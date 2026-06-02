@@ -17,8 +17,8 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         self.vae_scale_factor = sdxl_model_util.VAE_SCALE_FACTOR
         self.is_sdxl = True
 
-    def assert_extra_args(self, args, train_dataset_group):
-        super().assert_extra_args(args, train_dataset_group)
+    def assert_extra_args(self, args, train_dataset_group, val_dataset_group=None):
+        super().assert_extra_args(args, train_dataset_group, val_dataset_group)
         sdxl_train_util.verify_sdxl_training_args(args)
 
         if args.cache_text_encoder_outputs:
@@ -57,7 +57,7 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         return args.cache_text_encoder_outputs
 
     def cache_text_encoder_outputs_if_needed(
-        self, args, accelerator, unet, vae, tokenizers, text_encoders, dataset: train_util.DatasetGroup, weight_dtype
+        self, args, accelerator, unet, vae, text_encoders, dataset: train_util.DatasetGroup, weight_dtype
     ):
         if args.cache_text_encoder_outputs:
             if not args.lowram:

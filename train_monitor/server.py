@@ -17,20 +17,30 @@ import math
 import mimetypes
 import os
 import re
+import sys
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
+REPO = Path(__file__).resolve().parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
-HOST = "0.0.0.0"
+from mikazuki.anima_fast_backend.progress import (
+    merge_anima_training_metrics,
+    metrics_from_anima_events,
+    read_jsonl_events,
+)
+
+
+HOST = os.environ.get("TRAIN_MONITOR_HOST", "127.0.0.1")
 PORT = int(os.environ.get("TRAIN_MONITOR_PORT", 6008))
 _GUI_API_PORT = int(os.environ.get("MIKAZUKI_PORT", 28000))
 GUI_API = f"http://127.0.0.1:{_GUI_API_PORT}/api"
-REPO = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = REPO / "output"
 LOG_DIR = REPO / "logs"
@@ -66,6 +76,29 @@ WARNING_PATTERNS = [
 def fetch_json(url: str, timeout: float = 2.5) -> dict:
     with urlopen(url, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def gui_api_candidates() -> list[str]:
+    ports: list[int] = []
+    for value in (os.environ.get("MIKAZUKI_PORT"), "28000"):
+        try:
+            port = int(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+        if port not in ports:
+            ports.append(port)
+    return [f"http://127.0.0.1:{port}/api" for port in ports]
+
+
+def fetch_gui_json(path: str, timeout: float = 2.5) -> tuple[dict, str]:
+    errors: list[str] = []
+    for api_base in gui_api_candidates():
+        try:
+            return fetch_json(f"{api_base}{path}", timeout=timeout), api_base
+        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            errors.append(f"{api_base}: {exc}")
+            continue
+    raise OSError("; ".join(errors) or "no GUI API candidates")
 
 
 def api_data(payload: dict) -> dict:
@@ -122,6 +155,60 @@ def resolve_repo_path(value: str | None) -> Path | None:
 # File scanning
 # ---------------------------------------------------------------------------
 
+MODEL_FILE_GLOBS = ("*.safetensors", "*.ckpt", "*.pt")
+
+
+def _parse_epoch_from_name(name: str) -> int | None:
+    for pattern in (
+        r"-e(\d+)",
+        r"_e(\d+)",
+        r"epoch[_-]?(\d+)",
+        r"e(\d+)\.",
+        r"model-e(\d+)",
+    ):
+        match = re.search(pattern, name, flags=re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                continue
+    return None
+
+
+def _model_file_entry(path: Path) -> dict:
+    st = path.stat()
+    try:
+        rel_path = str(path.relative_to(REPO)).replace("\\", "/")
+    except ValueError:
+        rel_path = str(path)
+    try:
+        folder = str(path.parent.relative_to(REPO)).replace("\\", "/")
+    except ValueError:
+        folder = str(path.parent)
+    return {
+        "name": path.name,
+        "path": str(path),
+        "size": human_size(st.st_size),
+        "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        "mtime_ts": st.st_mtime,
+        "rel_path": rel_path,
+        "folder": folder,
+        "ext": path.suffix.lower(),
+        "epoch": _parse_epoch_from_name(path.name),
+    }
+
+
+def newest_model_files(root: Path, limit: int = 12) -> list[dict]:
+    if not root.exists():
+        return []
+    files: list[Path] = []
+    for pattern in MODEL_FILE_GLOBS:
+        files.extend(root.rglob(pattern))
+    files = [p for p in files if p.is_file()]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return [_model_file_entry(p) for p in files[:limit]]
+
+
 def newest_files(root: Path, limit: int = 8) -> list[dict]:
     if not root.exists():
         return []
@@ -139,36 +226,82 @@ def newest_files(root: Path, limit: int = 8) -> list[dict]:
             "path": str(p),
             "size": human_size(st.st_size),
             "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "mtime_ts": st.st_mtime,
         })
     return out
 
 
-def newest_preview_images(limit: int = 6) -> list[dict]:
-    config = latest_training_config()
-    output_dir = resolve_repo_path(str(config.get("output_dir", "")))
-    output_name = str(config.get("output_name", "")).strip()
-    try:
-        max_epochs = int(float(str(config.get("max_train_epochs", "")).strip()))
-    except ValueError:
-        max_epochs = 0
-    roots = []
-    if output_dir is not None:
-        roots.extend([output_dir / "sample", output_dir])
-    else:
-        roots.extend([OUTPUT_DIR / "sample", OUTPUT_DIR, LOG_DIR])
+def build_model_outputs(train_out: Path | None) -> dict:
+    scope_label = ""
+    if train_out is not None:
+        try:
+            scope_label = str(train_out.relative_to(REPO)).replace("\\", "/")
+        except ValueError:
+            scope_label = str(train_out)
 
-    newest_by_name: dict[str, Path] = {}
-    for root in roots:
-        if not root.exists():
-            continue
-        for p in root.rglob("*"):
-            if not p.is_file() or p.suffix.lower() not in IMAGE_EXTENSIONS:
+    primary: list[dict] = []
+    if train_out is not None and train_out.exists():
+        primary = newest_model_files(train_out, limit=12)
+
+    primary_paths = {item["path"] for item in primary}
+    other: list[dict] = []
+    if OUTPUT_DIR.exists():
+        for item in newest_model_files(OUTPUT_DIR, limit=24):
+            if item["path"] in primary_paths:
                 continue
-            if output_name and not p.name.startswith(output_name):
+            other.append(item)
+            if len(other) >= 8:
+                break
+
+    combined = primary if primary else newest_model_files(OUTPUT_DIR, limit=8)
+    return {
+        "output_scope": scope_label,
+        "outputs_primary": primary,
+        "outputs_other": other,
+        "outputs": combined,
+    }
+
+
+def newest_preview_images(
+    limit: int = 6,
+    output_dir: Path | None = None,
+    output_name: str = "",
+    max_epochs: int = 0,
+) -> list[dict]:
+    config = latest_training_config()
+    if output_dir is None:
+        output_dir = resolve_repo_path(str(config.get("output_dir", "")))
+    if not output_name:
+        output_name = str(config.get("output_name", "")).strip()
+    if max_epochs <= 0:
+        try:
+            max_epochs = int(float(str(config.get("max_train_epochs", "")).strip()))
+        except ValueError:
+            max_epochs = 0
+
+    def _collect(name_filter: str) -> dict[str, Path]:
+        newest_by_name: dict[str, Path] = {}
+        roots: list[Path] = []
+        if output_dir is not None:
+            roots.extend([output_dir / "sample", output_dir])
+        else:
+            roots.extend([OUTPUT_DIR / "sample", OUTPUT_DIR, LOG_DIR])
+        for root in roots:
+            if not root.exists():
                 continue
-            old = newest_by_name.get(p.name)
-            if old is None or p.stat().st_mtime >= old.stat().st_mtime:
-                newest_by_name[p.name] = p
+            for p in root.rglob("*"):
+                if not p.is_file() or p.suffix.lower() not in IMAGE_EXTENSIONS:
+                    continue
+                if name_filter and not p.name.startswith(name_filter):
+                    continue
+                old = newest_by_name.get(p.name)
+                if old is None or p.stat().st_mtime >= old.stat().st_mtime:
+                    newest_by_name[p.name] = p
+        return newest_by_name
+
+    newest_by_name = _collect(output_name)
+    if not newest_by_name and output_name:
+        newest_by_name = _collect("")
 
     all_files = list(newest_by_name.values())
     all_files.sort(key=lambda p: p.stat().st_mtime)
@@ -287,7 +420,7 @@ def tensorboard_loss_scalars(limit: int = TENSORBOARD_LOSS_LIMIT) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 _TOML_STR_KEYS = ("output_dir", "output_name", "optimizer_type", "lr_scheduler",
-                   "network_module", "network_args", "train_data_dir", "reg_data_dir",
+                   "network_module", "network_args", "train_data_dir", "source_image_dir", "reg_data_dir",
                    "resolution", "mixed_precision")
 _TOML_NUM_KEYS = ("max_train_epochs", "max_train_steps", "learning_rate", "unet_lr",
                    "text_encoder_lr", "network_dim", "network_alpha", "train_batch_size",
@@ -387,7 +520,7 @@ def _extract_train_params(config: dict) -> list[dict]:
                 pass
         params.append({"label": label, "value": str(val)})
 
-    train_data_dir = config.get("train_data_dir", "")
+    train_data_dir = config.get("train_data_dir") or config.get("source_image_dir") or ""
     if train_data_dir:
         resolved = resolve_repo_path(train_data_dir)
         reg_dir = config.get("reg_data_dir", "")
@@ -587,7 +720,21 @@ def infer_model_type(lines: list[str]) -> str:
             config_text = ""
     source = text + "\n" + config_text
     adapter = _infer_adapter_type(source)
-    if "anima_train_network" in source or "lora_anima" in source or "tlora_anima" in source or "qwen3" in source:
+    anima_network = "anima_train_network" in source
+    anima_finetune = not anima_network and (
+        "anima-finetune" in source
+        or "anima_train.py" in source
+        or "scripts/dev/anima_train" in source
+        or "scripts\\dev\\anima_train" in source
+    )
+    if anima_finetune:
+        return "Anima Finetune"
+    if (
+        anima_network
+        or "lora_anima" in source
+        or "tlora_anima" in source
+        or "qwen3" in source
+    ):
         return f"Anima {adapter}"
     if "flux_train_network" in source or "flux-lora" in source or "t5xxl" in source:
         return f"Flux {adapter}"
@@ -618,11 +765,14 @@ def parse_log(lines: list[str]) -> dict:
         step = int(m.group("step"))
         total = int(m.group("total"))
         elapsed = m.group("elapsed") or ""
+        eta = (m.group("eta") or "").strip()
+        if eta in ("?", "-"):
+            eta = ""
         info.update({
             "percent": min(100.0, round(step * 100 / total, 2)) if total else int(m.group("pct")),
             "step": step,
             "total_steps": total,
-            "eta": m.group("eta") or "",
+            "eta": eta,
         })
         if elapsed:
             duration = format_duration(elapsed)
@@ -664,13 +814,17 @@ def parse_log(lines: list[str]) -> dict:
         current, total = epoch_matches[-1]
         info["epoch"] = current + (f"/{total}" if total else "")
 
-    loss_matches = re.findall(r"(?:loss|train_loss)\s*[=:]\s*([0-9.eE+-]+)", source)
+    loss_matches = re.findall(
+        r"(?:loss|train_loss|avr_loss|loss/average|loss/current)\s*[=:]\s*([0-9.eE+-]+)",
+        source,
+    )
     if loss_matches:
         info["loss"] = loss_matches[-1]
 
     loss_points: list[dict[str, float | int]] = []
     for m in re.finditer(
-        r"(?:^|[\r\n])steps:.*?\|\s*(?P<step>\d+)\s*/\s*(?P<total>\d+).*?(?:avr_loss|train_loss|loss)\s*[=:]\s*(?P<loss>[0-9.eE+-]+)",
+        r"(?:^|[\r\n])steps:.*?\|\s*(?P<step>\d+)\s*/\s*(?P<total>\d+)"
+        r".*?(?:avr_loss|train_loss|loss/average|loss/current|loss)\s*[=:]\s*(?P<loss>[0-9.eE+-]+)",
         source,
     ):
         try:
@@ -744,6 +898,23 @@ def parse_log(lines: list[str]) -> dict:
     return info
 
 
+def anima_fast_progress_metrics(task: dict) -> dict:
+    metadata = task.get("metadata") or {}
+    if metadata.get("backend") != "anima-lora-fast":
+        return {}
+    raw_path = metadata.get("progress_jsonl")
+    if not raw_path:
+        return {}
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = (REPO / path).resolve()
+    events = read_jsonl_events(path)
+    metrics = metrics_from_anima_events(events)
+    if metrics:
+        metrics["progress_source"] = "anima_progress_jsonl"
+    return metrics
+
+
 # ---------------------------------------------------------------------------
 # Status collection
 # ---------------------------------------------------------------------------
@@ -754,52 +925,105 @@ def _training_output_dir() -> Path | None:
     return resolve_repo_path(str(config.get("output_dir", "")))
 
 
+def _task_output_dir(task: dict) -> Path | None:
+    metadata = task.get("metadata") or {}
+    output_dir = metadata.get("output_dir")
+    if output_dir:
+        return resolve_repo_path(str(output_dir))
+    return None
+
+
+def _preview_context(active: dict | None, train_config: dict) -> tuple[Path | None, str, int]:
+    output_dir = _task_output_dir(active) if active else None
+    if output_dir is None:
+        output_dir = resolve_repo_path(str(train_config.get("output_dir", "")))
+
+    output_name = str(train_config.get("output_name", "")).strip()
+    config_output_dir = resolve_repo_path(str(train_config.get("output_dir", "")))
+    if active and output_dir is not None and config_output_dir is not None and output_dir != config_output_dir:
+        output_name = str((active.get("metadata") or {}).get("output_name", "")).strip()
+
+    try:
+        max_epochs = int(float(str(train_config.get("max_train_epochs", "")).strip()))
+    except ValueError:
+        max_epochs = 0
+    return output_dir, output_name, max_epochs
+
+
 def collect_status() -> dict:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        previews = newest_preview_images()
-    except Exception:
-        previews = []
-
-    train_out = _training_output_dir()
-    output_scan_dir = train_out if train_out is not None and train_out.exists() else OUTPUT_DIR
     train_config = latest_training_config()
-
     status = {
         "time": now,
         "gui_online": False,
+        "gui_warning": "",
         "state": "GUI 离线",
         "tasks": [],
         "active_task": None,
-        "model_type": "未知类型",
+        "model_type": None,
         "log_lines": [],
         "metrics": {},
-        "previews": previews,
-        "outputs": newest_files(output_scan_dir),
+        "previews": [],
         "log_files": newest_files(LOG_DIR),
+        "outputs": [],
+        "outputs_primary": [],
+        "outputs_other": [],
+        "output_scope": "",
         "train_params": _extract_train_params(train_config),
         "tensorboard_loss": tensorboard_loss_scalars(),
         "gpu_info": gpu_info(),
     }
 
+    gui_api = GUI_API
     try:
-        tasks_payload = fetch_json(f"{GUI_API}/train/tasks")
+        tasks_payload, gui_api = fetch_gui_json("/train/tasks")
         tasks = api_data(tasks_payload).get("tasks", [])
         status["gui_online"] = True
         status["tasks"] = tasks
-    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-        status["error"] = f"无法连接 6006 GUI API: {exc}"
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        status["gui_warning"] = (
+            f"主 GUI API 暂不可用（尝试 {', '.join(gui_api_candidates())}）：{exc}。"
+            "训练参数、GPU 状态和 TensorBoard Loss 仍会继续同步。"
+        )
+        preview_dir, preview_name, max_epochs = _preview_context(None, train_config)
+        try:
+            status["previews"] = newest_preview_images(
+                output_dir=preview_dir,
+                output_name=preview_name,
+                max_epochs=max_epochs,
+            )
+        except Exception:
+            status["previews"] = []
+        train_out = preview_dir or _training_output_dir()
+        status.update(build_model_outputs(train_out))
         return status
+
+    active = None
+    if status["tasks"]:
+        active = next((t for t in reversed(status["tasks"]) if t.get("status") == "RUNNING"), status["tasks"][-1])
+    preview_dir, preview_name, max_epochs = _preview_context(active, train_config)
+    try:
+        status["previews"] = newest_preview_images(
+            output_dir=preview_dir,
+            output_name=preview_name,
+            max_epochs=max_epochs,
+        )
+    except Exception:
+        status["previews"] = []
+
+    train_out = preview_dir or _training_output_dir()
+    status.update(build_model_outputs(train_out))
 
     if not status["tasks"]:
         status["state"] = "空闲"
+        status["model_type"] = None
         return status
 
-    active = next((t for t in reversed(status["tasks"]) if t.get("status") == "RUNNING"), status["tasks"][-1])
     status["active_task"] = active
     state_map = {
         "RUNNING": "训练中",
         "FINISHED": "已结束",
+        "FAILED": "失败",
         "TERMINATED": "已终止",
         "CREATED": "已创建，等待启动",
     }
@@ -808,13 +1032,19 @@ def collect_status() -> dict:
     task_id = active.get("id")
     if task_id:
         try:
-            tail_payload = fetch_json(f"{GUI_API}/train/log/tail/{task_id}?limit=2000")
+            tail_payload, _tail_url = fetch_gui_json(f"/train/log/tail/{task_id}?limit=2000")
             data = api_data(tail_payload)
             lines = data.get("lines", [])
             status["log_lines"] = lines
             status["model_type"] = infer_model_type(lines)
             try:
-                status["metrics"] = parse_log(lines)
+                stdout_metrics = parse_log(lines)
+                anima_metrics = anima_fast_progress_metrics(active)
+                if anima_metrics:
+                    status["metrics"] = merge_anima_training_metrics(stdout_metrics, anima_metrics)
+                    status["model_type"] = "Anima Fast LoRA"
+                else:
+                    status["metrics"] = stdout_metrics
                 metrics = status["metrics"]
                 task_status = active.get("status", "")
                 update_progress_health(task_id, task_status, metrics)

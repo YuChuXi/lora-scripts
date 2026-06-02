@@ -41,10 +41,22 @@ def reverse_proxy_maker(url_type: str, full_path: bool = False):
         try:
             rp_resp = await client.send(rp_req, stream=True)
         except ConnectError:
-            return PlainTextResponse(
-                content="The requested service not started yet or service started fail. This may cost a while when you first time startup\n请求的服务尚未启动或启动失败。若是第一次启动，可能需要等待一段时间后再刷新网页。",
-                status_code=502
-            )
+            if url_type == "tageditor":
+                hint = (
+                    "The requested service not started yet or service started fail. "
+                    "This may cost a while when you first time startup.\n"
+                    "请求的服务尚未启动或启动失败。若是第一次启动，可能需要等待一段时间后再刷新网页。\n\n"
+                    "If this persists, the dataset-tag-editor submodule may not be installed.\n"
+                    "如果持续出现此问题，可能是标签编辑器子模块未安装。\n"
+                    "Run: git submodule update --init --recursive"
+                )
+            else:
+                hint = (
+                    "The requested service not started yet or service started fail. "
+                    "This may cost a while when you first time startup.\n"
+                    "请求的服务尚未启动或启动失败。若是第一次启动，可能需要等待一段时间后再刷新网页。"
+                )
+            return PlainTextResponse(content=hint, status_code=502)
         return StreamingResponse(
             rp_resp.aiter_raw(),
             status_code=rp_resp.status_code,
@@ -82,7 +94,8 @@ async def proxy_ws_reverse(ws_a: WebSocket, ws_b: websockets.WebSocketClientProt
 @router.websocket("/proxy/tageditor/queue/join")
 async def websocket_a(ws_a: WebSocket):
     # for temp use
-    ws_b_uri = "ws://127.0.0.1:28001/queue/join"
+    port = os.environ.get("MIKAZUKI_TAGEDITOR_PORT", "28001")
+    ws_b_uri = f"ws://127.0.0.1:{port}/queue/join"
     await ws_a.accept()
     async with websockets.connect(ws_b_uri, timeout=360, ping_timeout=None) as ws_b_client:
         fwd_task = asyncio.create_task(proxy_ws_forward(ws_a, ws_b_client))

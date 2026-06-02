@@ -18,6 +18,11 @@ parser.add_argument("--skip-prepare-environment", action="store_true")
 parser.add_argument("--skip-prepare-onnxruntime", action="store_true")
 parser.add_argument("--disable-tensorboard", action="store_true", default=False)
 parser.add_argument("--disable-tageditor", action="store_true")
+parser.add_argument(
+    "--enable-legacy-tageditor",
+    action="store_true",
+    help="Start the legacy Gradio Dataset Tag Editor compatibility service.",
+)
 parser.add_argument("--disable-train-monitor", action="store_true")
 parser.add_argument("--disable-auto-mirror", action="store_true")
 parser.add_argument("--tensorboard-host", type=str, default="127.0.0.1", help="Port to run the tensorboard")
@@ -30,28 +35,33 @@ parser.add_argument("--browser", type=str, default=None,
 parser.add_argument("--dev", action="store_true")
 
 
-def ensure_port_available(port: int, fallback_start: int, fallback_end: int, label: str, reserved_ports: set[int]) -> int:
-    if port not in reserved_ports and check_port_avaliable(port):
+def ensure_port_available(
+    port: int,
+    fallback_start: int,
+    fallback_end: int,
+    label: str,
+    reserved_ports: set[int],
+    preferred_reserved_port: int | None = None,
+) -> int:
+    if (port == preferred_reserved_port or port not in reserved_ports) and check_port_avaliable(port):
         reserved_ports.add(port)
         return port
 
     for candidate in range(fallback_start, fallback_end):
-        if candidate in reserved_ports:
+        if candidate in reserved_ports and candidate != preferred_reserved_port:
             continue
         if check_port_avaliable(candidate):
             reserved_ports.add(candidate)
             log.warning(f"{label} port {port} is already in use, using {candidate} instead.")
             return candidate
 
-    log.error(f"{label} port finding fallback error")
+    log.error(f"{label}: no available port in range {fallback_start}-{fallback_end}.")
     return port
 
 
 @catch_exception
 def run_train_monitor():
-    log.info(f"Starting train status monitor on port {args.train_monitor_port}...")
     env = os.environ.copy()
-    env["TRAIN_MONITOR_PORT"] = str(args.train_monitor_port)
     subprocess.Popen([sys.executable, str(base_dir_path() / "train_monitor" / "server.py")], env=env)
 
 
@@ -63,22 +73,48 @@ def run_tensorboard():
 
 
 @catch_exception
-def run_tag_editor():
+def run_tag_editor(port: int):
+    scripts_dir = base_dir_path() / "mikazuki" / "dataset-tag-editor" / "scripts"
+    launch_script = scripts_dir / "launch.py"
+    if not launch_script.exists():
+        log.warning(
+            "Dataset Tag Editor not found (submodule not initialized). "
+            "Attempting to initialize... / "
+            "标签编辑器未找到（子模块未初始化），正在尝试自动初始化..."
+        )
+        try:
+            subprocess.run(
+                ["git", "submodule", "update", "--init", "--depth=1", "--", "mikazuki/dataset-tag-editor"],
+                cwd=str(base_dir_path()), timeout=120, check=False,
+            )
+        except Exception as e:
+            log.warning(f"Auto-init submodule failed: {e}")
+        if not launch_script.exists():
+            log.error(
+                "Dataset Tag Editor still not available after init attempt. "
+                "Please run 'git submodule update --init' manually. / "
+                "自动初始化失败，请手动执行 git submodule update --init。"
+            )
+            return
     log.info("Starting tageditor...")
-    cmd = [
-        sys.executable,
-        base_dir_path() / "mikazuki/dataset-tag-editor/scripts/launch.py",
-        "--port", "28001",
+    tag_args = [
+        "--port", str(port),
         "--shadow-gradio-output",
         "--root-path", "/proxy/tageditor"
     ]
     if args.localization:
-        cmd.extend(["--localization", args.localization])
+        tag_args.extend(["--localization", args.localization])
     else:
         l = locale.getdefaultlocale()[0]
         if l and l.startswith("zh"):
-            cmd.extend(["--localization", "zh-Hans"])
-    subprocess.Popen(cmd)
+            tag_args.extend(["--localization", "zh-Hans"])
+    bootstrap = (
+        "import sys;"
+        f"sys.path.insert(0, {str(scripts_dir)!r});"
+        f"sys.argv = [{str(launch_script)!r}] + {tag_args!r};"
+        f"exec(compile(open({str(launch_script)!r}).read(), {str(launch_script)!r}, 'exec'))"
+    )
+    subprocess.Popen([sys.executable, "-s", "-c", bootstrap])
 
 
 def launch():
@@ -88,22 +124,48 @@ def launch():
     log.info("Starting SD-Trainer Mikazuki GUI...")
     log.info(f"Base directory: {base_dir_path()}, Working directory: {os.getcwd()}")
     log.info(f"{platform.system()} Python {platform.python_version()} {sys.executable}")
+    legacy_tageditor_enabled = args.enable_legacy_tageditor and not args.disable_tageditor
 
     if not args.skip_prepare_environment:
         prepare_environment(disable_auto_mirror=args.disable_auto_mirror)
 
-    # Keep fallback ports near their defaults and reserve chosen ports so two
-    # child services cannot both fall back to the same port before they start.
-    reserved_ports: set[int] = set()
-    if not args.disable_tageditor:
-        reserved_ports.add(28001)
-    args.port = ensure_port_available(args.port, args.port, args.port + 20, "GUI", reserved_ports)
+    # Protect each service's default port before scanning fallbacks. Otherwise
+    # TensorBoard can claim 6008 as a fallback and make monitor links open it.
+    protected_default_ports = {args.port}
+    if legacy_tageditor_enabled:
+        protected_default_ports.add(28001)
+    if not args.disable_tensorboard:
+        protected_default_ports.add(args.tensorboard_port)
+    if not args.disable_train_monitor:
+        protected_default_ports.add(args.train_monitor_port)
+
+    reserved_ports: set[int] = set(protected_default_ports)
+    tageditor_port = 28001
+    if legacy_tageditor_enabled:
+        tageditor_port = ensure_port_available(
+            28001, 28001, 28020, "Tag editor", reserved_ports, preferred_reserved_port=28001
+        )
+    args.port = ensure_port_available(
+        args.port, args.port, args.port + 20, "GUI", reserved_ports, preferred_reserved_port=args.port
+    )
     if not args.disable_tensorboard:
         args.tensorboard_port = ensure_port_available(
-            args.tensorboard_port, args.tensorboard_port, args.tensorboard_port + 20, "TensorBoard", reserved_ports)
+            args.tensorboard_port,
+            args.tensorboard_port,
+            args.tensorboard_port + 20,
+            "TensorBoard",
+            reserved_ports,
+            preferred_reserved_port=args.tensorboard_port,
+        )
     if not args.disable_train_monitor:
         args.train_monitor_port = ensure_port_available(
-            args.train_monitor_port, args.train_monitor_port, args.train_monitor_port + 20, "Train monitor", reserved_ports)
+            args.train_monitor_port,
+            args.train_monitor_port,
+            args.train_monitor_port + 20,
+            "Train monitor",
+            reserved_ports,
+            preferred_reserved_port=args.train_monitor_port,
+        )
 
     from mikazuki.update_check import local_version
     log.info(f"SD-Trainer Version: {local_version()}")
@@ -113,6 +175,7 @@ def launch():
     os.environ["MIKAZUKI_TENSORBOARD_HOST"] = args.tensorboard_host
     os.environ["MIKAZUKI_TENSORBOARD_PORT"] = str(args.tensorboard_port)
     os.environ["TRAIN_MONITOR_PORT"] = str(args.train_monitor_port)
+    os.environ["MIKAZUKI_TAGEDITOR_PORT"] = str(tageditor_port)
     os.environ["MIKAZUKI_DEV"] = "1" if args.dev else "0"
     if args.browser:
         os.environ["MIKAZUKI_BROWSER"] = args.browser
@@ -121,8 +184,10 @@ def launch():
         args.host = "0.0.0.0"
         args.tensorboard_host = "0.0.0.0"
 
-    if not args.disable_tageditor:
-        run_tag_editor()
+    if legacy_tageditor_enabled:
+        run_tag_editor(tageditor_port)
+    else:
+        log.info("Using native dataset editor at /dataset-editor.html; legacy Gradio tag editor is disabled.")
 
     if not args.disable_tensorboard:
         run_tensorboard()

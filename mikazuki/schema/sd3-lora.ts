@@ -88,7 +88,9 @@ Schema.intersect([
                 rank_dropout: Schema.number().step(0.01).min(0).max(1).description("rank dropout 概率"),
                 module_dropout: Schema.number().step(0.01).min(0).max(1).description("module dropout 概率"),
                 rank_dropout_scale: Schema.boolean().default(false).description("对 rank dropout 进行缩放补偿"),
-                dropout: Schema.number().hidden(),
+                conv_dim: Schema.number().min(1).description("卷积层维度。不填则跳过卷积层训练"),
+                conv_alpha: Schema.number().min(1).description("卷积层 Alpha。通常等于 conv_dim 或 conv_dim/2"),
+                dropout: Schema.number().step(0.01).min(0).max(1).description("Dropout 概率"),
                 pissa_init: Schema.boolean().hidden(),
                 network_dropout: Schema.number().hidden(),
             }),
@@ -195,6 +197,8 @@ Schema.intersect([
 
     Schema.object(
         UpdateSchema(SHARED_SCHEMAS.RAW.PRECISION_CACHE_BATCH, {
+            full_fp16: Schema.boolean().description("完全使用 FP16 精度训练可训练权重。Anima 一般不建议开启；Automagic / CAME 会自动禁用以降低 loss=nan 风险。fp16 不是 NaN 绕过方案，支持 bf16 的显卡会自动改回 bf16"),
+            full_bf16: Schema.boolean().description("完全使用 BF16 精度训练可训练权重。Anima 一般不建议开启；Automagic / CAME 会自动禁用以降低 loss=nan 风险"),
             fp8_base: Schema.boolean().default(false).description("对基础模型使用 FP8 精度"),
             fp8_base_unet: Schema.boolean().default(false).description("仅对 DiT / U-Net 使用 FP8 精度"),
             cache_text_encoder_outputs: Schema.boolean().default(true).description("缓存文本编码器的输出，减少显存使用。使用时需要关闭 shuffle_caption"),

@@ -31,9 +31,11 @@ $excludeDirs = @(
     "logs",
     "output",
     "huggingface",
+    "tagger-models",
     "sd-models",
     "wd14_tagger_model",
     "train",
+    "extensions",
     ".idea",
     ".vscode",
     ".sisyphus",
@@ -58,6 +60,9 @@ New-Item -ItemType Directory -Path (Join-Path $BuildDir "sd-models") -Force | Ou
 New-Item -ItemType Directory -Path (Join-Path $BuildDir "output") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $BuildDir "logs") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $BuildDir "huggingface") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $BuildDir "tagger-models") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $BuildDir "tagger-models\wd14") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $BuildDir "tagger-models\vlm") -Force | Out-Null
 
 Write-Host "用户目录创建完成" -ForegroundColor Green
 

@@ -6,6 +6,16 @@
 
 > 技术细节：该页面复用了原 SD3 的 URL 槽位（`/lora/sd3.html`），但参数集合与训练脚本已完全是 Anima。
 
+## 下载 Anima 模型
+
+Anima 训练需要三个权重文件（DiT、Qwen3 文本编码器、VAE）。**整合包**根目录或**源码 clone 根目录**均可双击：
+
+```text
+Download-Anima-Model.bat
+```
+
+脚本会从 ModelScope（`circlestone-labs/Anima`）下载到相对路径 **`sd-models/anima/`**，已存在的文件会自动跳过。也支持放在整合包根目录（与 `run_gui.bat` 同级）或 `SD-Trainer/` 内（与 `gui.py` 同级）。
+
 ## 模型路径
 
 表单里需要填以下模型路径：
@@ -43,6 +53,8 @@
 本地入口 [`scripts/dev/anima_train_network.py`](../scripts/dev/anima_train_network.py) 是兼容 wrapper：它适配 GUI 生成的 TOML，并委托给 `vendor/sd-scripts` 中的 kohya-ss 后端执行训练。
 
 配置文件：[`config/anima_backend.toml`](../config/anima_backend.toml)
+
+**Fast 模式（进阶插件）**：与标准 Kohya 后端并列，需单独安装插件；同参下 RTX 4090 实测约 **2.5×** 步速提升。详见 **[Anima Fast 模式指南](./anima-fast.md)**。
 
 ## 进阶：T-LoRA 训练教程
 
@@ -102,6 +114,10 @@ T-LoRA（Timestep-Dependent LoRA）是一种改进的 LoRA 方法。普通 LoRA 
 **Q: T-LoRA 的模型文件可以直接用普通 LoRA 加载吗？**
 
 可以。T-LoRA 的模型权重格式与普通 LoRA 兼容，推理时使用完整 rank（不做时间步动态调整），可以在任何支持 LoRA 的推理工具中正常加载。
+
+**Q: 使用 Automagic / CAME 训练时 loss 变成 NaN？**
+
+优先确认 PyTorch 版本 ≥ 2.5，并避免开启 `full_bf16` / `full_fp16`。Anima 页面仍可使用 `mixed_precision=bf16`，但可训练 LoRA 权重建议保持 FP32；后端会在 `Automagic` 和 `pytorch_optimizer.CAME` 下自动关闭 full 半精度训练，以降低 NaN 风险。不要把 bf16 改成 fp16 作为绕过方案；fp16 数值范围更窄，通常只会让 NaN 晚几步出现。支持 bf16 的显卡上，后端会把这两个优化器的 Anima fp16 配置自动改回 bf16。
 
 **Q: T-LoRA 和 LoKr 哪个好？**
 

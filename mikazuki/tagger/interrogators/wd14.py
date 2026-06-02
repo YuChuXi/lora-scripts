@@ -14,6 +14,7 @@ from PIL import UnidentifiedImageError
 from huggingface_hub import hf_hub_download
 from mikazuki.tagger.interrogators.base import Interrogator
 from mikazuki.tagger import dbimutils, format
+from mikazuki.tagger.local_models import local_model_asset_paths
 
 
 class WaifuDiffusionInterrogator(Interrogator):
@@ -30,7 +31,13 @@ class WaifuDiffusionInterrogator(Interrogator):
         self.kwargs = kwargs
 
     def download(self) -> Tuple[os.PathLike, os.PathLike]:
-        print(f"Loading {self.name} model file from {self.kwargs['repo_id']}")
+        local_paths = local_model_asset_paths(self.name, self)
+        if local_paths:
+            print(f"Loading {self.name} model from local tagger-models directory")
+            return local_paths
+
+        repo_id = self.kwargs["repo_id"]
+        print(f"Loading {self.name} model from {repo_id} (first run may download ~400MB, see console log)")
 
         model_path = Path(hf_hub_download(
             **self.kwargs, filename=self.model_path))

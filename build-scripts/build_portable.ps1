@@ -1,9 +1,12 @@
 param(
     [string]$ProjectRoot = (Split-Path $PSScriptRoot -Parent),
-    [string]$Version     = "2.4.0",
+    [string]$Version     = "2.5.0",
     [string]$PythonVer   = "3.10.11",
+    [string]$TkinterSourceRoot = "",
     [switch]$Clean,
-    [switch]$Skip7z
+    [switch]$Skip7z,
+    [switch]$SkipTaggerPrefetch,
+    [string]$TaggerCacheSource = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +16,7 @@ $buildDir    = Join-Path $ProjectRoot "build"
 $portableDir = Join-Path $buildDir "SD-Trainer-Portable"
 $pythonDir   = Join-Path $portableDir "python_embeded"
 $sdtDir      = Join-Path $portableDir "SD-Trainer"
+$tempGitCloneDir = Join-Path $buildDir "_portable_git_metadata"
 
 $7zExe = "C:\Program Files\7-Zip\7z.exe"
 if (-not (Test-Path $7zExe)) {
@@ -32,9 +36,110 @@ if ($Clean -and (Test-Path $portableDir)) {
 }
 New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
 
+function Invoke-GitChecked {
+    param(
+        [string[]]$Arguments,
+        [string]$WorkingDirectory = $ProjectRoot,
+        [string]$ErrorMessage = "git command failed"
+    )
+    & git -C $WorkingDirectory @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw $ErrorMessage
+    }
+}
+
+function Initialize-DatasetTagEditor {
+    Write-Host "  Checking dataset-tag-editor submodule..."
+    $tagEditorLaunch = Join-Path $ProjectRoot "mikazuki\dataset-tag-editor\scripts\launch.py"
+    if (-not (Test-Path $tagEditorLaunch)) {
+        Write-Host "  Initializing dataset-tag-editor submodule..."
+        Invoke-GitChecked `
+            -Arguments @("submodule", "update", "--init", "--recursive", "--depth=1", "--", "mikazuki/dataset-tag-editor") `
+            -ErrorMessage "dataset-tag-editor submodule init failed"
+    }
+    if (-not (Test-Path $tagEditorLaunch)) {
+        throw "dataset-tag-editor\scripts\launch.py missing after submodule init"
+    }
+}
+
+function Clone-SDTrainerGitMetadata {
+    param([string]$Destination)
+    Write-Host "  Embedding shallow .git metadata for Update-SD-Trainer.bat..."
+    if (Test-Path $tempGitCloneDir) {
+        Remove-Item $tempGitCloneDir -Recurse -Force
+    }
+    $branch = (& git -C $ProjectRoot branch --show-current 2>$null | Select-Object -First 1)
+    if (-not $branch) { $branch = "main" }
+    $remote = (& git -C $ProjectRoot remote get-url origin 2>$null | Select-Object -First 1)
+    if (-not $remote) { $remote = "https://github.com/wochenlong/lora-scripts-next.git" }
+
+    & git clone --depth=1 --single-branch --branch $branch $remote $tempGitCloneDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to clone shallow git metadata from $remote"
+    }
+    $dstGit = Join-Path $Destination "SD-Trainer\.git"
+    if (Test-Path $dstGit) {
+        Remove-Item $dstGit -Recurse -Force
+    }
+    Copy-Item (Join-Path $tempGitCloneDir ".git") $dstGit -Recurse -Force
+    Remove-Item $tempGitCloneDir -Recurse -Force
+
+    if (-not (Test-Path (Join-Path $dstGit "HEAD"))) {
+        throw "embedded SD-Trainer\.git is missing HEAD"
+    }
+}
+
+function Resolve-TaggerCacheSource {
+    param(
+        [string]$Explicit,
+        [string]$BuildDirectory
+    )
+    if ($Explicit -and (Test-Path $Explicit)) {
+        return (Resolve-Path $Explicit).Path
+    }
+    $modelDirName = "models--SmilingWolf--wd-v1-4-convnextv2-tagger-v2"
+    $candidates = @()
+    foreach ($dir in Get-ChildItem $BuildDirectory -Directory -ErrorAction SilentlyContinue) {
+        if ($dir.Name -notlike "SD-Trainer*") { continue }
+        $hubModel = Join-Path $dir.FullName "huggingface\hub\$modelDirName"
+        if (Test-Path $hubModel) {
+            $candidates += $dir.FullName
+        }
+    }
+    if ($candidates.Count -eq 0) { return $null }
+    return ($candidates | Sort-Object { $_ } -Descending | Select-Object -First 1)
+}
+
+function Copy-TaggerCacheFromSource {
+    param(
+        [string]$SourceRoot,
+        [string]$DestinationPortable
+    )
+    $modelDirName = "models--SmilingWolf--wd-v1-4-convnextv2-tagger-v2"
+    $copied = $false
+
+    $srcHubModel = Join-Path $SourceRoot "huggingface\hub\$modelDirName"
+    $dstHub = Join-Path $DestinationPortable "huggingface\hub"
+    if (Test-Path $srcHubModel) {
+        New-Item -ItemType Directory -Path $dstHub -Force | Out-Null
+        $null = robocopy $srcHubModel (Join-Path $dstHub $modelDirName) /E /NFL /NDL /NJH /NJS /NC /NS
+        if ($LASTEXITCODE -le 7) { $copied = $true }
+    }
+
+    $srcWd14 = Join-Path $SourceRoot "tagger-models\wd14"
+    $dstWd14 = Join-Path $DestinationPortable "tagger-models\wd14"
+    if (Test-Path $srcWd14) {
+        New-Item -ItemType Directory -Path $dstWd14 -Force | Out-Null
+        $null = robocopy $srcWd14 $dstWd14 /E /NFL /NDL /NJH /NJS /NC /NS
+        if ($LASTEXITCODE -le 7) { $copied = $true }
+    }
+
+    return $copied
+}
+
 # ==== Step 1: Python Embeddable ====
 
-Write-Host "[1/5] Preparing Python $PythonVer Embeddable..." -ForegroundColor Cyan
+Write-Host "[1/6] Preparing Python $PythonVer Embeddable..." -ForegroundColor Cyan
 
 $pythonZipName = "python-$PythonVer-embed-amd64.zip"
 $pythonUrl     = "https://www.python.org/ftp/python/$PythonVer/$pythonZipName"
@@ -73,30 +178,80 @@ $sitePackages = Join-Path $pythonDir "Lib\site-packages"
 New-Item -ItemType Directory -Path $sitePackages -Force | Out-Null
 
 # tkinter for GUI folder/file picker (embeddable Python omits it by default)
+function Test-TkinterSourceRoot {
+    param([string]$Root)
+    if (-not $Root -or -not (Test-Path $Root)) { return $false }
+    $libTk = Join-Path $Root "Lib\tkinter"
+    if (-not (Test-Path $libTk)) { $libTk = Join-Path $Root "lib\tkinter" }
+    $tcl = Join-Path $Root "tcl"
+    $pyd = Join-Path $Root "DLLs\_tkinter.pyd"
+    return (Test-Path $libTk) -and (Test-Path $tcl) -and (Test-Path $pyd)
+}
+
+function Get-TkinterSourceCandidates {
+    param([string]$ExpectedVersion = "3.10")
+    $roots = [System.Collections.Generic.List[string]]::new()
+
+    if ($TkinterSourceRoot -and (Test-Path $TkinterSourceRoot)) {
+        $roots.Add($TkinterSourceRoot.TrimEnd('\'))
+    }
+    if ($env:SD_TRAINER_TKINTER_SOURCE -and (Test-Path $env:SD_TRAINER_TKINTER_SOURCE)) {
+        $roots.Add($env:SD_TRAINER_TKINTER_SOURCE.TrimEnd('\'))
+    }
+
+    # Official CPython first — avoid conda/mambaforge (often missing tcl/)
+    foreach ($fixed in @(
+        "C:\Program Files\Python310",
+        "C:\Program Files (x86)\Python310"
+    )) {
+        if (Test-Path $fixed) { $roots.Add($fixed) }
+    }
+
+    foreach ($exe in @(
+        "C:\Program Files\Python310\python.exe",
+        "C:\Program Files (x86)\Python310\python.exe"
+    )) {
+        if (-not (Test-Path $exe)) { continue }
+        try {
+            $out = (& $exe -c "import sys; print(sys.base_prefix)" 2>$null | Select-Object -First 1)
+            if ($out) { $roots.Add($out.Trim()) }
+        } catch { }
+    }
+
+    try {
+        $pyList = & py -0p 2>&1
+        foreach ($line in $pyList) {
+            if ($line -notmatch "3\.10") { continue }
+            if ($line -notmatch "([A-Za-z]:\\[^\s]+\.exe)\s*$") { continue }
+            $exe = $Matches[1].Trim()
+            if ($exe -match "mambaforge|miniconda|anaconda|conda", "IgnoreCase") { continue }
+            $out = (& $exe -c "import sys; print(sys.base_prefix)" 2>$null | Select-Object -First 1)
+            if ($out) { $roots.Add($out.Trim()) }
+        }
+    } catch { }
+
+    return $roots | Select-Object -Unique
+}
+
 function Install-EmbeddedTkinter {
     param(
         [string]$EmbedDir,
         [string]$ExpectedVersion = "3.10"
     )
     $fullRoot = $null
-    $candidates = @(
-        { & py "-$ExpectedVersion" -c "import sys; print(sys.base_prefix)" },
-        { & "C:\Program Files\Python310\python.exe" -c "import sys; print(sys.base_prefix)" }
-    )
-    foreach ($candidate in $candidates) {
-        try {
-            $out = (& $candidate 2>$null | Select-Object -First 1)
-            if ($out -and (Test-Path $out.Trim())) {
-                $fullRoot = $out.Trim()
-                break
-            }
-        } catch {
-            continue
+    foreach ($candidate in (Get-TkinterSourceCandidates -ExpectedVersion $ExpectedVersion)) {
+        if (Test-TkinterSourceRoot $candidate) {
+            $fullRoot = $candidate
+            break
         }
     }
     if (-not $fullRoot) {
-        Write-Host "  WARNING: No full Python $ExpectedVersion found; tkinter not bundled (folder picker disabled)" -ForegroundColor Yellow
-        return
+        Write-Host "  ERROR: No CPython $ExpectedVersion with tcl/ + tkinter found." -ForegroundColor Red
+        Write-Host "         Install https://www.python.org/downloads/release/python-31011/ (Windows x64)," -ForegroundColor Red
+        Write-Host "         or pass -TkinterSourceRoot 'C:\Program Files\Python310'," -ForegroundColor Red
+        Write-Host "         or set env SD_TRAINER_TKINTER_SOURCE to a full Python root." -ForegroundColor Red
+        Write-Host "         Do NOT use conda/mambaforge — folder picker will break." -ForegroundColor Red
+        throw "tkinter source not found"
     }
     $libTk = Join-Path $fullRoot "Lib\tkinter"
     if (-not (Test-Path $libTk)) {
@@ -128,7 +283,9 @@ function Install-EmbeddedTkinter {
     if ($LASTEXITCODE -eq 0 -and ($check -match "ok")) {
         Write-Host "  tkinter bundled from $fullRoot" -ForegroundColor Green
     } else {
-        Write-Host "  WARNING: tkinter copy failed verification: $check" -ForegroundColor Yellow
+        Write-Host "  ERROR: tkinter verification failed after copy from $fullRoot" -ForegroundColor Red
+        Write-Host "         $check" -ForegroundColor Red
+        throw "tkinter bundle verification failed"
     }
 }
 
@@ -152,10 +309,9 @@ if (-not (Test-Path $getPipPath)) {
 # ==== Step 2: Copy project files ====
 
 Write-Host ""
-Write-Host "[2/5] Copying project files..." -ForegroundColor Cyan
+Write-Host "[2/6] Copying project files..." -ForegroundColor Cyan
 
-Push-Location $ProjectRoot
-Pop-Location
+Initialize-DatasetTagEditor
 
 $copyDirs = @(
     @{ Src = "assets";  Dst = "assets" },
@@ -163,15 +319,15 @@ $copyDirs = @(
     @{ Src = "frontend"; Dst = "frontend" },
     @{ Src = "config";   Dst = "config" },
     @{ Src = "scripts";  Dst = "scripts" },
-    @{ Src = "vendor";   Dst = "vendor" }
+    @{ Src = "vendor";   Dst = "vendor" },
+    @{ Src = "train_monitor"; Dst = "train_monitor" }
 )
 
 $copyFiles = @(
     "gui.py",
-    "train_status_server.py",
+    "run_gui.bat",
     "requirements.txt",
     "setup_environment.py",
-    "apply_lora_next_anima_defaults.py",
     "VERSION",
     "LICENSE",
     "NOTICE.md",
@@ -183,7 +339,7 @@ $copyFiles = @(
 $excludeDirs = @(
     ".git", "__pycache__", ".vscode", ".idea",
     "node_modules", ".sisyphus", ".playwright-mcp", ".tmp",
-    "anima_lora", "drafts"
+    "anima_lora", "extensions", "drafts"
 )
 
 foreach ($dir in $copyDirs) {
@@ -218,111 +374,110 @@ foreach ($file in $copyFiles) {
         Copy-Item $src -Destination (Join-Path $sdtDir $file)
     }
 }
+Clone-SDTrainerGitMetadata -Destination $portableDir
 Write-Host "  Copied root files"
 Write-Host "  Done" -ForegroundColor Green
 
-# ==== Step 3: Create launcher scripts ====
+# ==== Step 3: Bundle default WD tagger (offline batch tagging) ====
 
 Write-Host ""
-Write-Host "[3/5] Creating launcher scripts..." -ForegroundColor Cyan
+Write-Host "[3/6] Bundling default WD tagger (wd14-convnextv2-v2, ~388 MB)..." -ForegroundColor Cyan
 
-# run_gui_portable.bat — portable-only launcher, flat goto structure, no BOM
-$batContent = "@echo off`r`n"
-$batContent += "chcp 65001 >nul 2>&1`r`n"
-$batContent += "title SD-Trainer`r`n"
-$batContent += "`r`n"
-$batContent += "set `"BASE_DIR=%~dp0`"`r`n"
-$batContent += "set `"HF_HOME=%~dp0huggingface`"`r`n"
-$batContent += "set `"PYTHONUTF8=1`"`r`n"
-$batContent += "set `"PYTHON_EXE=%~dp0python_embeded\python.exe`"`r`n"
-$batContent += "set `"LOG_FILE=%BASE_DIR%sd-trainer-log.txt`"`r`n"
-$batContent += "`r`n"
-$batContent += ":: Log header`r`n"
-$batContent += "echo ============================================ > `"%LOG_FILE%`"`r`n"
-$batContent += "echo  SD-Trainer Launch Log >> `"%LOG_FILE%`"`r`n"
-$batContent += "echo  Time: %date% %time% >> `"%LOG_FILE%`"`r`n"
-$batContent += "echo  Path: %BASE_DIR% >> `"%LOG_FILE%`"`r`n"
-$batContent += "echo  Python: %PYTHON_EXE% >> `"%LOG_FILE%`"`r`n"
-$batContent += "echo ============================================ >> `"%LOG_FILE%`"`r`n"
-$batContent += "echo. >> `"%LOG_FILE%`"`r`n"
-$batContent += "`r`n"
-$batContent += ":: Check python exists`r`n"
-$batContent += "if not exist `"%PYTHON_EXE%`" goto :no_python`r`n"
-$batContent += "`r`n"
-$batContent += ":: First run: install dependencies`r`n"
-$batContent += "if not exist `"%BASE_DIR%python_embeded\Lib\site-packages\torch`" goto :first_run`r`n"
-$batContent += "goto :launch`r`n"
-$batContent += "`r`n"
-$batContent += ":first_run`r`n"
-$batContent += "echo.`r`n"
-$batContent += "echo  [First Run] Installing dependencies, please keep network connected...`r`n"
-$batContent += "echo.`r`n"
-$batContent += "echo [setup] Starting setup_environment.py >> `"%LOG_FILE%`"`r`n"
-$batContent += "`"%PYTHON_EXE%`" -s `"%BASE_DIR%SD-Trainer\setup_environment.py`" 2>> `"%LOG_FILE%`"`r`n"
-$batContent += "if errorlevel 1 (`r`n"
-$batContent += "    echo [setup] FAILED >> `"%LOG_FILE%`"`r`n"
-$batContent += "    echo.`r`n"
-$batContent += "    echo  Setup failed. Check log: %LOG_FILE%`r`n"
-$batContent += "    goto :fail`r`n"
-$batContent += ")`r`n"
-$batContent += "echo [setup] OK >> `"%LOG_FILE%`"`r`n"
-$batContent += "`r`n"
-$batContent += ":launch`r`n"
-$batContent += "cd /d `"%BASE_DIR%SD-Trainer`"`r`n"
-$batContent += "if errorlevel 1 goto :no_project`r`n"
-$batContent += "`r`n"
-$batContent += "echo [launch] Starting gui.py >> `"%LOG_FILE%`"`r`n"
-$batContent += "echo.`r`n"
-$batContent += "echo  Starting SD-Trainer...`r`n"
-$batContent += "echo.`r`n"
-$batContent += "`r`n"
-$batContent += "`"%PYTHON_EXE%`" -s gui.py --skip-prepare-environment --port 28000 2>> `"%LOG_FILE%`"`r`n"
-$batContent += "set `"EXIT_CODE=%errorlevel%`"`r`n"
-$batContent += "echo [launch] gui.py exited with code %EXIT_CODE% >> `"%LOG_FILE%`"`r`n"
-$batContent += "`r`n"
-$batContent += "if %EXIT_CODE% neq 0 (`r`n"
-$batContent += "    echo.`r`n"
-$batContent += "    echo  ============================================`r`n"
-$batContent += "    echo   SD-Trainer exited abnormally [code: %EXIT_CODE%]`r`n"
-$batContent += "    echo   Log: %LOG_FILE%`r`n"
-$batContent += "    echo   Please send this log when reporting bugs.`r`n"
-$batContent += "    echo  ============================================`r`n"
-$batContent += "    echo.`r`n"
-$batContent += ")`r`n"
-$batContent += "pause`r`n"
-$batContent += "exit /b %EXIT_CODE%`r`n"
-$batContent += "`r`n"
-$batContent += ":no_python`r`n"
-$batContent += "echo.`r`n"
-$batContent += "echo  [ERROR] python_embeded\python.exe not found!`r`n"
-$batContent += "echo  Please make sure the package is fully extracted.`r`n"
-$batContent += "echo.`r`n"
-$batContent += "echo [ERROR] python_embeded\python.exe not found >> `"%LOG_FILE%`"`r`n"
-$batContent += "goto :fail`r`n"
-$batContent += "`r`n"
-$batContent += ":no_project`r`n"
-$batContent += "echo.`r`n"
-$batContent += "echo  [ERROR] SD-Trainer folder not found!`r`n"
-$batContent += "echo.`r`n"
-$batContent += "echo [ERROR] Cannot cd to %BASE_DIR%SD-Trainer >> `"%LOG_FILE%`"`r`n"
-$batContent += "goto :fail`r`n"
-$batContent += "`r`n"
-$batContent += ":fail`r`n"
-$batContent += "echo.`r`n"
-$batContent += "echo  ============================================`r`n"
-$batContent += "echo   SD-Trainer failed to start.`r`n"
-$batContent += "echo   Log: %LOG_FILE%`r`n"
-$batContent += "echo   Please send this log when reporting bugs.`r`n"
-$batContent += "echo  ============================================`r`n"
-$batContent += "echo.`r`n"
-$batContent += "pause`r`n"
-$batContent += "exit /b 1`r`n"
-[System.IO.File]::WriteAllText(
-    (Join-Path $portableDir "run_gui_portable.bat"),
-    $batContent,
-    (New-Object System.Text.UTF8Encoding $false)
-)
-Write-Host "  Created run_gui_portable.bat"
+$hfHome = Join-Path $portableDir "huggingface"
+$taggerModelsDir = Join-Path $portableDir "tagger-models"
+New-Item -ItemType Directory -Path $hfHome -Force | Out-Null
+New-Item -ItemType Directory -Path $taggerModelsDir -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $portableDir "tagger-models\wd14") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $portableDir "tagger-models\vlm") -Force | Out-Null
+$prefetchScript = Join-Path $sdtDir "scripts\prefetch_default_tagger.py"
+$taggerCacheSrc = Resolve-TaggerCacheSource -Explicit $TaggerCacheSource -BuildDirectory $buildDir
+if ($taggerCacheSrc) {
+    Write-Host "  Seeding tagger cache from: $taggerCacheSrc"
+    if (-not (Copy-TaggerCacheFromSource -SourceRoot $taggerCacheSrc -DestinationPortable $portableDir)) {
+        Write-Host "  WARNING: tagger cache source had no usable hub/tagger-models data" -ForegroundColor Yellow
+    }
+}
+
+if ($SkipTaggerPrefetch) {
+    Write-Host "  Skipping tagger prefetch (-SkipTaggerPrefetch)" -ForegroundColor Yellow
+} elseif (-not (Test-Path $prefetchScript)) {
+    throw "prefetch script missing: $prefetchScript"
+} else {
+    $env:HF_HOME = $hfHome
+    $env:MIKAZUKI_TAGGER_MODELS_DIR = $taggerModelsDir
+    if (-not $env:HF_ENDPOINT) { $env:HF_ENDPOINT = "https://hf-mirror.com" }
+
+    $prefetchPython = $null
+    if (Test-Path $pythonExe) {
+        $prefetchPython = $pythonExe
+    } elseif (Test-Path (Join-Path $ProjectRoot "venv\Scripts\python.exe")) {
+        $prefetchPython = (Join-Path $ProjectRoot "venv\Scripts\python.exe")
+    } elseif (Get-Command python -ErrorAction SilentlyContinue) {
+        $prefetchPython = (Get-Command python).Source
+    }
+
+    if (-not $prefetchPython) {
+        throw "No Python available for tagger prefetch (need embed python, venv, or PATH python)"
+    }
+
+    Write-Host "  Prefetch Python: $prefetchPython"
+
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    if ($prefetchPython -eq $pythonExe) {
+        if (Test-Path $getPipPath) {
+            Write-Host "  Bootstrapping pip in embedded Python..."
+            & $pythonExe $getPipPath --no-warn-script-location 2>&1 | Out-Null
+        }
+        & $prefetchPython -s -m pip install -q huggingface_hub requests 2>&1 | Out-Null
+        & $prefetchPython -s $prefetchScript --hf-home $hfHome --tagger-models-dir $taggerModelsDir --if-missing
+    } else {
+        & $prefetchPython -m pip install -q huggingface_hub requests 2>&1 | Out-Null
+        & $prefetchPython $prefetchScript --hf-home $hfHome --tagger-models-dir $taggerModelsDir --if-missing
+    }
+    $prefetchExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+
+    if ($prefetchExit -ne 0) {
+        throw "tagger prefetch failed (exit $prefetchExit). Check HF network or retry with HF_ENDPOINT=https://hf-mirror.com"
+    }
+    Write-Host "  Cached under tagger-models/ (portable canonical path)" -ForegroundColor Green
+
+    $localTaggerDir = Join-Path $portableDir "tagger-models\wd14\wd14-convnextv2-v2"
+    $required = @("model.onnx", "selected_tags.csv")
+    foreach ($name in $required) {
+        if (-not (Test-Path (Join-Path $localTaggerDir $name))) {
+            throw "Default tagger missing in tagger-models after prefetch: $localTaggerDir\$name"
+        }
+    }
+
+    # Portable offline tagging resolves MIKAZUKI_TAGGER_MODELS_DIR first; drop HF hub duplicate.
+    $hubModel = Join-Path $portableDir "huggingface\hub\models--SmilingWolf--wd-v1-4-convnextv2-tagger-v2"
+    if (Test-Path $hubModel) {
+        Remove-Item $hubModel -Recurse -Force
+        Write-Host "  Removed HF hub duplicate (tagger-models is canonical)" -ForegroundColor Green
+    }
+
+    $embedSitePackages = Join-Path $pythonDir "Lib\site-packages"
+    if (Test-Path $embedSitePackages) {
+        Get-ChildItem $embedSitePackages -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "  Cleared build-time pip packages from python_embeded" -ForegroundColor Green
+    }
+}
+
+# ==== Step 4: Create launcher scripts ====
+
+Write-Host ""
+Write-Host "[4/6] Creating launcher scripts..." -ForegroundColor Cyan
+
+# run_gui_portable.bat — root shim (logic lives in SD-Trainer/scripts/portable/, updates with project)
+$shimSrc = Join-Path $ProjectRoot "scripts\portable\run_gui_portable_shim.bat"
+if (Test-Path $shimSrc) {
+    Copy-Item $shimSrc -Destination (Join-Path $portableDir "run_gui_portable.bat") -Force
+    Write-Host "  Created run_gui_portable.bat (shim -> scripts/portable/launch_portable.bat)"
+} else {
+    Write-Host "  WARNING: scripts/portable/run_gui_portable_shim.bat not found" -ForegroundColor Yellow
+}
 
 # Use the repo's run_gui.bat as the portable entrypoint (it auto-detects
 # python_embeded and dispatches to run_gui_portable.bat).
@@ -338,11 +493,21 @@ if (Test-Path $repoRunGui) {
 $updateDir = Join-Path $portableDir "update"
 New-Item -ItemType Directory -Path $updateDir -Force | Out-Null
 
-$updateBat = "@echo off`r`nchcp 65001 >nul 2>&1`r`ncd /d `"%~dp0..\SD-Trainer`"`r`n"
-$updateBat += "echo Updating SD-Trainer...`r`ngit pull`r`necho Done.`r`npause`r`n"
+$updateBat = "@echo off`r`nchcp 65001 >nul 2>&1`r`n"
+$updateBat += "call `"%~dp0..\Update-SD-Trainer.bat`" %*`r`n"
+$updateBat += "exit /b %errorlevel%`r`n"
 [System.IO.File]::WriteAllText(
     (Join-Path $updateDir "update_sd_trainer.bat"),
     $updateBat,
+    (New-Object System.Text.UTF8Encoding $false)
+)
+
+$updateReleaseBat = "@echo off`r`nchcp 65001 >nul 2>&1`r`n"
+$updateReleaseBat += "call `"%~dp0..\Update-SD-Trainer-Release.bat`" %*`r`n"
+$updateReleaseBat += "exit /b %errorlevel%`r`n"
+[System.IO.File]::WriteAllText(
+    (Join-Path $updateDir "update_from_release.bat"),
+    $updateReleaseBat,
     (New-Object System.Text.UTF8Encoding $false)
 )
 
@@ -379,20 +544,23 @@ Write-Host "  Created install_xformers.bat"
 
 # Root-level utility bat files
 $templateDir = Join-Path $PSScriptRoot "templates"
-foreach ($bat in @("Update-SD-Trainer.bat", "Download-Anima-Model.bat")) {
-    $src = Join-Path $templateDir $bat
+foreach ($bat in @("Update-SD-Trainer.bat", "Update-SD-Trainer-Release.bat", "Download-Anima-Model.bat")) {
+    $src = Join-Path $ProjectRoot $bat
+    if (-not (Test-Path $src)) {
+        $src = Join-Path $templateDir $bat
+    }
     if (Test-Path $src) {
         Copy-Item $src -Destination (Join-Path $portableDir $bat)
         Write-Host "  Created $bat"
     }
 }
 
-# ==== Step 4: Empty dirs + README ====
+# ==== Step 5: Empty dirs + README ====
 
 Write-Host ""
-Write-Host "[4/5] Creating user directories and README..." -ForegroundColor Cyan
+Write-Host "[5/6] Creating user directories and README..." -ForegroundColor Cyan
 
-foreach ($d in @("sd-models", "output", "logs", "huggingface")) {
+foreach ($d in @("sd-models", "output", "logs", "huggingface", "tagger-models", "tagger-models\wd14", "tagger-models\vlm")) {
     $p = Join-Path $portableDir $d
     New-Item -ItemType Directory -Path $p -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $p ".gitkeep"), "")
@@ -404,16 +572,25 @@ $readme += "Quick Start:`r`n"
 $readme += "  1. Double-click run_gui.bat`r`n"
 $readme += "  2. First launch requires internet (downloads ~3 GB of PyTorch)`r`n"
 $readme += "  3. Open http://127.0.0.1:28000 in browser`r`n`r`n"
+$readme += "Tagging:`r`n"
+$readme += "  Default WD tagger (wd14-convnextv2-v2) is bundled under tagger-models/wd14/`r`n"
+$readme += "  (~400 MB). Put extra WD/CL tag models in tagger-models/wd14/<model-key>/`r`n"
+$readme += "  Future VLM caption models can be placed under tagger-models/vlm/<model-key>/`r`n"
+$readme += "  with the files required by that model, such as model.onnx and selected_tags.csv.`r`n`r`n"
 $readme += "Directories:`r`n"
 $readme += "  run_gui.bat      - Stable entrypoint for portable users`r`n"
-$readme += "  run_gui_portable.bat - Portable-only launcher used by run_gui.bat`r`n"
+$readme += "  run_gui_portable.bat - Legacy shim (logic in SD-Trainer/scripts/portable/)`r`n"
 $readme += "  python_embeded/  - Python runtime`r`n"
 $readme += "  SD-Trainer/      - Project files`r`n"
 $readme += "  sd-models/       - Put your models here`r`n"
 $readme += "  output/          - Training output`r`n"
 $readme += "  logs/            - Logs`r`n`r`n"
+$readme += "  tagger-models/   - Local tagger models`r`n`r`n"
 $readme += "Update:`r`n"
-$readme += "  update\update_sd_trainer.bat       - Update project code`r`n"
+$readme += "  Update-SD-Trainer.bat                - Git update (recommended if .git exists)`r`n"
+$readme += "  Update-SD-Trainer-Release.bat      - Download latest Release 7z and merge`r`n"
+$readme += "  update\update_sd_trainer.bat       - Shortcut to Update-SD-Trainer.bat`r`n"
+$readme += "  update\update_from_release.bat     - Shortcut to Update-SD-Trainer-Release.bat`r`n"
 $readme += "  update\update_dependencies.bat     - Update Python packages`r`n`r`n"
 $readme += "Requirements:`r`n"
 $readme += "  - Windows 10/11 64-bit`r`n"
@@ -437,7 +614,7 @@ Write-Host "  Done" -ForegroundColor Green
 
 if (-not $Skip7z) {
     Write-Host ""
-    Write-Host "[5/5] Creating 7z archive..." -ForegroundColor Cyan
+    Write-Host "[6/6] Creating 7z archive..." -ForegroundColor Cyan
 
     if (-not $7zExe) {
         Write-Host "  [!] 7-Zip not found, skipping compression." -ForegroundColor Yellow
@@ -455,7 +632,7 @@ if (-not $Skip7z) {
     }
 } else {
     Write-Host ""
-    Write-Host "[5/5] Skipping 7z compression" -ForegroundColor Yellow
+    Write-Host "[6/6] Skipping 7z compression" -ForegroundColor Yellow
 }
 
 # ==== Done ====

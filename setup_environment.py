@@ -12,13 +12,22 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ──────────────────── Configuration ────────────────────
 
 TORCH_VERSION = "2.7.0"
 TORCHVISION_VERSION = "0.22.0"
 CUDA_TAG = "cu128"
+PYTHON_TAG = "cp310"
+PLATFORM_TAG = "win_amd64"
+TORCH_WHEEL_NAME = (
+    f"torch-{TORCH_VERSION}+{CUDA_TAG}-{PYTHON_TAG}-{PYTHON_TAG}-{PLATFORM_TAG}.whl"
+)
+PROBE_BYTES = 32 * 1024 * 1024
+PROBE_MAX_SECONDS = 15
 
 MIRROR_PROFILES = {
     "china": {
@@ -36,6 +45,24 @@ MIRROR_PROFILES = {
         "hf_endpoint": None,
     },
 }
+
+PYTORCH_SOURCES = [
+    {
+        "label": "阿里云 PyTorch Wheels",
+        "mode": "find-links",
+        "url": f"https://mirrors.aliyun.com/pytorch-wheels/{CUDA_TAG}/",
+    },
+    {
+        "label": "SJTUG PyTorch Wheels",
+        "mode": "index-url",
+        "url": f"https://mirror.sjtu.edu.cn/pytorch-wheels/{CUDA_TAG}",
+    },
+    {
+        "label": "PyTorch Official",
+        "mode": "index-url",
+        "url": f"https://download.pytorch.org/whl/{CUDA_TAG}",
+    },
+]
 
 DISK_SPACE_REQUIRED_GB = 7
 
@@ -93,11 +120,22 @@ def _separator():
 
 
 def check_already_installed():
-    """Return True if torch is installed in the embedded site-packages."""
+    """Return True only when core runtime deps are importable."""
     torch_dir = os.path.join(
         _base_dir(), "python_embeded", "Lib", "site-packages", "torch"
     )
-    return os.path.isdir(torch_dir)
+    if not os.path.isdir(torch_dir):
+        return False
+
+    core_modules = ("torch", "torchvision", "accelerate", "diffusers", "gradio")
+    for module in core_modules:
+        try:
+            __import__(module)
+        except Exception as exc:
+            print(f"  检测到依赖不完整，将执行修复安装：{module} ({exc})")
+            return False
+
+    return True
 
 
 def check_disk_space():
@@ -148,6 +186,76 @@ def _run_pip(args):
     return subprocess.call(cmd, env=env) == 0
 
 
+def _join_wheel_url(base_url):
+    return base_url.rstrip("/") + "/" + urllib.parse.quote(TORCH_WHEEL_NAME, safe="")
+
+
+def _probe_url(source, timeout=15):
+    # Measure real wheel throughput instead of only first-byte latency. Some
+    # mirrors respond quickly but download large wheels very slowly.
+    t0 = time.perf_counter()
+    wheel_url = _join_wheel_url(source["url"])
+    request = urllib.request.Request(
+        wheel_url,
+        headers={
+            "User-Agent": "SD-Trainer installer",
+            "Range": f"bytes=0-{PROBE_BYTES - 1}",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        status = getattr(response, "status", 200)
+        if status >= 400:
+            raise OSError(f"HTTP {status}")
+        bytes_read = 0
+        while (
+            bytes_read < PROBE_BYTES
+            and time.perf_counter() - t0 < PROBE_MAX_SECONDS
+        ):
+            chunk = response.read(min(1024 * 1024, PROBE_BYTES - bytes_read))
+            if not chunk:
+                break
+            bytes_read += len(chunk)
+
+    elapsed = max(time.perf_counter() - t0, 0.001)
+    if bytes_read <= 0:
+        raise OSError("empty response")
+    return {
+        **source,
+        "elapsed": elapsed,
+        "bytes_read": bytes_read,
+        "mbps": bytes_read / elapsed / (1024 * 1024),
+    }
+
+
+def probe_pytorch_sources():
+    """Probe PyTorch wheel sources concurrently and return them by speed."""
+    print("  正在测速 PyTorch 下载源...")
+    results = []
+    with ThreadPoolExecutor(max_workers=len(PYTORCH_SOURCES)) as executor:
+        futures = {
+            executor.submit(_probe_url, source): source
+            for source in PYTORCH_SOURCES
+        }
+        for future in as_completed(futures):
+            source = futures[future]
+            try:
+                result = future.result()
+                results.append(result)
+                print(
+                    f"    OK   {result['label']} "
+                    f"({result['mbps']:.1f} MB/s, {result['elapsed']:.2f}s)"
+                )
+            except Exception as exc:
+                print(f"    FAIL {source['label']} ({exc})")
+
+    if not results:
+        return []
+
+    results.sort(key=lambda item: (-item["mbps"], item["elapsed"]))
+    print(f"  已选择最快源: {results[0]['label']}")
+    return results
+
+
 def install_pip():
     get_pip = _get_pip_path()
     if not os.path.exists(get_pip):
@@ -162,19 +270,30 @@ def install_pip():
     ) == 0
 
 
-def install_torch(region):
-    cfg = MIRROR_PROFILES[region]
-    args = [
-        "install",
-        f"torch=={TORCH_VERSION}+{CUDA_TAG}",
-        f"torchvision=={TORCHVISION_VERSION}+{CUDA_TAG}",
-        "--no-warn-script-location",
-    ]
-    if region == "china":
-        args += ["-f", cfg["torch_find_links"]]
-    else:
-        args += ["--index-url", cfg["torch_index_url"]]
-    return _run_pip(args)
+def install_torch(_region):
+    sources = probe_pytorch_sources()
+    if not sources:
+        _fail("所有 PyTorch 下载源均无法连接，请检查网络或代理设置后重试")
+        return False
+
+    for index, source in enumerate(sources):
+        if index:
+            print(f"  正在尝试备用源: {source['label']}")
+        args = [
+            "install",
+            f"torch=={TORCH_VERSION}+{CUDA_TAG}",
+            f"torchvision=={TORCHVISION_VERSION}+{CUDA_TAG}",
+            "--no-warn-script-location",
+        ]
+        if source["mode"] == "find-links":
+            args += ["-f", source["url"]]
+        else:
+            args += ["--index-url", source["url"]]
+        if _run_pip(args):
+            return True
+
+    _fail("所有可连接的 PyTorch 下载源均安装失败，请检查网络、代理或 pip 输出后重试")
+    return False
 
 
 def _filter_requirements(req_file):
