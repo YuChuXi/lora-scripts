@@ -12,9 +12,19 @@ class AnimaFastStaticIntegrationTests(unittest.TestCase):
 
         self.assertIn('default("anima-lora-fast")', schema)
         self.assertIn("ANIMA_FAST_LR_OPTIMIZER", schema)
-        self.assertIn('"Automagic"', shared)
-        self.assertNotIn("prodigyplus.ProdigyPlusScheduleFree", shared[shared.index("ANIMA_FAST_LR_OPTIMIZER"):])
+        fast_optimizer = shared[shared.index("ANIMA_FAST_LR_OPTIMIZER"):]
+        self.assertIn('"Automagic"', shared[: shared.index("ANIMA_FAST_LR_OPTIMIZER")])
+        self.assertNotIn('"Automagic"', fast_optimizer)
+        self.assertNotIn("prodigyplus.ProdigyPlusScheduleFree", fast_optimizer)
+        self.assertNotIn('"EmoSens"', fast_optimizer)
+        self.assertIn('"EmoSens"', shared[: shared.index("ANIMA_FAST_LR_OPTIMIZER")])
         self.assertIn('Schema.const("lora")', schema)
+
+    def test_fast_adapter_does_not_whitelist_emosens(self):
+        adapter = Path("mikazuki/anima_fast_backend/adapter.py").read_text(encoding="utf-8")
+        self.assertIn("FAST_SUPPORTED_OPTIMIZERS", adapter)
+        self.assertNotIn('"EmoSens"', adapter)
+        self.assertNotIn('"Automagic",', adapter[adapter.index("FAST_SUPPORTED_OPTIMIZERS"): adapter.index("@dataclass")])
 
     def test_fast_train_type_is_not_legacy_trainer_mapping(self):
         source = Path("mikazuki/app/api.py").read_text(encoding="utf-8")

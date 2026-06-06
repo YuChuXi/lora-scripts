@@ -2,6 +2,8 @@
 
 本文记录 Windows 便携整合包的打包契约，以及将整合包改为"保留 `.git`、支持一键 Git 更新"后的实现方案。
 
+> **团队约定与变迁记录**：[Discussion #73 — 整合包更新机制](https://github.com/wochenlong/lora-scripts-next/discussions/73)（双通道、bootstrap、`UPDATER_VERSION` 演进索引）
+
 > **v2.5.2 用户**：若出现「能开网页但无法开始训练」，请升级到 **v2.5.3**（见 [`portable-upgrade-2.5.2-to-2.5.3.md`](portable-upgrade-2.5.2-to-2.5.3.md)，[Issue #54](https://github.com/wochenlong/lora-scripts-next/issues/54)）。
 
 ## 目标
@@ -113,11 +115,21 @@ sd-trainer-log.txt
 
 Release 更新实现：`SD-Trainer/scripts/portable/update_from_release.ps1`
 
+**版本标识（排障用，长期约定）**：
+
+- 整合包：`SD-Trainer/VERSION`、`SD-Trainer/PORTABLE_BUILD`（构建 commit）
+- 更新器：`SD-Trainer/scripts/portable/UPDATER_VERSION`（更新脚本逻辑版本；改 bat/ps1 行为时递增）
+- 更新开始时会打印：**当前 VERSION / PORTABLE_BUILD**、**线上 main VERSION / 最新 Release**、**本地与线上 UPDATER_VERSION**
+- **自更新（bootstrap）**：`Update-*.bat` 会先从 GitHub `main` 拉取最新更新脚本（含镜像回退），若有变化则自动重启后再执行 Git / Release 更新；网络失败时回退到本地 bundled 脚本
+
 1. 通过 GitHub API 获取最新 `SD-Trainer-v*.7z` 资产
 2. 下载到 `update/.cache/`（含 ghfast / ghproxy 镜像回退）
 3. 7-Zip 解压到临时目录
-4. `robocopy` 合并 `SD-Trainer/`，排除用户数据目录
+4. `robocopy` 合并 `SD-Trainer/`（使用 `/IS /IT` 强制覆盖，**不用** `/XO`），排除用户数据目录
 5. 从 Release 包刷新根目录启动脚本与 `update/` 快捷方式
+6. 写入 `config/.portable_release_sync.json` 记录 Release 资产 id，便于同 VERSION 重发时识别
+
+**同 VERSION 重发（hotfix republish）**：若 GitHub Release 仍为 `v2.7.0` 但替换了 7z 资产，请用 **`Update-SD-Trainer-Release.bat`**。旧脚本因 `robocopy /XO` 会跳过「本地较新」文件导致看似更新成功但代码未变；Git 更新（`Update-SD-Trainer.bat`）仅跟随 **commit**，若修复只重打 7z 未 push 到 main，Git 路径也无法获得修复。新包内含 `SD-Trainer/PORTABLE_BUILD`（git short SHA + 构建时间）便于对比是否已同步最新构建。
 
 **Release 合并时保留**（不覆盖）：
 

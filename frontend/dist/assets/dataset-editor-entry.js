@@ -70,12 +70,14 @@
 
             <div id="side-panel-tagger" class="de-tab-panel">
               <h2>批量打标</h2>
-              <p class="de-placeholder">预留位置：后续接入现有数据集打标能力，只作用于当前范围。</p>
-              <button type="button" disabled>开始打标</button>
+              <p class="de-placeholder">为当前范围追加触发词；可先打标，再把角色名、画风词等触发词补到 caption 末尾。</p>
+              <label for="tagger-trigger-tags">额外触发词</label>
+              <input id="tagger-trigger-tags" type="text" placeholder="character name, style trigger">
+              <button id="apply-tagger-trigger" type="button">追加到当前范围</button>
             </div>
 
             <div id="side-panel-quick" class="de-tab-panel">
-              <h2>常用标签</h2>
+              <h2 class="de-quick-tags-title">常用标签</h2>
               <div id="quick-tags" class="de-quick-tags"></div>
               <div class="de-quick-custom">
                 <input id="quick-tag-input" type="text" placeholder="添加常用 tag">
@@ -163,30 +165,37 @@
     return true;
   }
 
+  function initializeMountedEditor() {
+    window.sdDatasetEditor?.init?.();
+  }
+
   function loadEditorScript() {
-    if (document.getElementById(EDITOR_SCRIPT_ID)) return;
-    if ([...document.scripts].some((script) => script.src.includes("/assets/dataset-editor.js"))) return;
+    if (document.getElementById(EDITOR_SCRIPT_ID)) {
+      initializeMountedEditor();
+      return;
+    }
+    if ([...document.scripts].some((script) => script.src.includes("/assets/dataset-editor.js"))) {
+      initializeMountedEditor();
+      return;
+    }
     const configured = document.querySelector('meta[name="sd-dataset-editor-script"]')?.content;
     const script = document.createElement("script");
     script.id = EDITOR_SCRIPT_ID;
-    script.src = configured || "/assets/dataset-editor.js?v=2.6.0";
+    script.src = configured || "/assets/dataset-editor.js?v=2.7.1";
     script.defer = true;
+    script.addEventListener("load", initializeMountedEditor, { once: true });
     document.body.appendChild(script);
   }
 
   function boot() {
     const root = document.querySelector("#app");
-    let mounted = false;
     let stableTimer = 0;
 
     function scheduleMount() {
       window.clearTimeout(stableTimer);
       stableTimer = window.setTimeout(() => {
-        if (mounted) return;
         if (mountEditor()) {
-          mounted = true;
           loadEditorScript();
-          if (observer) observer.disconnect();
         }
       }, 120);
     }
@@ -201,11 +210,8 @@
 
     scheduleMount();
     window.addEventListener("load", () => {
-      if (mounted) return;
       if (mountEditor()) {
-        mounted = true;
         loadEditorScript();
-        if (observer) observer.disconnect();
       }
     });
   }

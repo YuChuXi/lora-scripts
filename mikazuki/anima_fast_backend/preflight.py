@@ -6,7 +6,9 @@ from typing import Any, Callable
 import json
 import os
 import subprocess
+import sys
 
+from .extension_state import ExtensionLayout
 from .settings import RuntimeConfig
 
 
@@ -27,6 +29,7 @@ class ProbeFacts:
     quanto_importable: bool = False
     transformers_version: str = ""
     diffusers_version: str = ""
+    probe_error: str = ""
 
 
 @dataclass
@@ -91,11 +94,13 @@ print(json.dumps(facts))
         env=env,
     )
     if completed.returncode != 0:
-        return ProbeFacts()
+        detail = (completed.stderr or completed.stdout or "probe exited non-zero").strip()
+        return ProbeFacts(probe_error=detail[:800])
     try:
         raw = json.loads(completed.stdout.strip().splitlines()[-1])
     except (IndexError, json.JSONDecodeError):
-        return ProbeFacts()
+        stderr = (completed.stderr or completed.stdout or "invalid probe json").strip()
+        return ProbeFacts(probe_error=stderr[:800])
     return ProbeFacts(
         python_version=str(raw.get("python_version", "")),
         torch_version=str(raw.get("torch_version", "")),
@@ -159,6 +164,38 @@ def _dataset_images(root: Path) -> list[Path]:
     return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
 
 
+def _validate_plugin_python(runtime: RuntimeConfig, errors: list[str]) -> None:
+    if not runtime.python.is_file():
+        return
+    try:
+        actual = runtime.python.resolve()
+    except OSError:
+        return
+    if os.environ.get("ANIMA_LORA_PYTHON"):
+        return
+    try:
+        if actual == Path(sys.executable).resolve():
+            errors.append(
+                "Fast 预检查误用了 GUI 主环境 Python（非插件 venv）；"
+                "请在 Fast 页点击「修复插件」，或确认 extensions/anima_lora/.venv 已安装"
+            )
+            return
+    except OSError:
+        pass
+    expected = ExtensionLayout(runtime.lora_next_root / "extensions" / "anima_lora").venv_python
+    try:
+        expected_resolved = expected.resolve()
+    except OSError:
+        return
+    if expected_resolved.is_file() and actual != expected_resolved:
+        parts = str(actual).replace("\\", "/").split("/")
+        if "extensions/anima_lora/.venv" not in "/".join(parts):
+            errors.append(
+                f"Fast 应使用插件 venv Python（{expected_resolved}），当前为 {actual}；"
+                "请修复插件或设置 ANIMA_LORA_PYTHON"
+            )
+
+
 def _has_files(root: Path | None, suffixes: set[str] | None = None) -> bool:
     if root is None or not root.is_dir():
         return False
@@ -181,6 +218,8 @@ def run_preflight(config: dict[str, Any], runtime: RuntimeConfig, probe: Depende
         errors.append(f"anima_root does not exist: {runtime.anima_root}")
     if not runtime.python.is_file():
         errors.append(f"anima_lora python does not exist: {runtime.python}")
+    else:
+        _validate_plugin_python(runtime, errors)
     if not (runtime.anima_root / "train.py").is_file():
         errors.append(f"anima_lora train.py missing under {runtime.anima_root}")
     if not (runtime.anima_root / "configs" / "base.toml").is_file():
@@ -242,6 +281,13 @@ def run_preflight(config: dict[str, Any], runtime: RuntimeConfig, probe: Depende
     if torch_compile and tokens and static_token_count and tokens > static_token_count:
         errors.append(f"static_token_count={static_token_count} is smaller than resolution token count {tokens}")
 
+    optimizer_type = str(config.get("optimizer_type", "")).strip().lower()
+    if optimizer_type == "automagic":
+        errors.append(
+            "optimizer_type=Automagic is not supported by the Anima Fast plugin runtime; "
+            "use AdamW8bit or another Fast optimizer"
+        )
+
     cache_latents = _truthy(config.get("cache_latents"))
     cache_text_encoder = _truthy(config.get("cache_text_encoder_outputs"))
     skip_cache_check = _truthy(config.get("skip_cache_check"))
@@ -269,6 +315,10 @@ def run_preflight(config: dict[str, Any], runtime: RuntimeConfig, probe: Depende
     if not errors:
         dep = probe(runtime)
         facts.update(dep.__dict__)
+        if dep.probe_error:
+            errors.append(
+                f"anima_lora runtime probe failed using {runtime.python}: {dep.probe_error}"
+            )
         if not dep.python_version.startswith("3.13") and not runtime.allow_unsupported:
             errors.append(f"anima_lora requires Python 3.13.*, got {dep.python_version or 'unknown'}")
         if not dep.cuda_available:
@@ -278,15 +328,13 @@ def run_preflight(config: dict[str, Any], runtime: RuntimeConfig, probe: Depende
                 "torch package metadata is missing (dist-info corrupt); "
                 "repair the Anima Fast plugin before training"
             )
-        optimizer_type = str(config.get("optimizer_type", "")).strip().lower()
-        if optimizer_type == "automagic" and not dep.quanto_importable:
+        if str(config.get("attn_mode", "")).strip() == "flash" and not dep.flash_attn_importable:
             errors.append(
-                "optimizer_type=Automagic requires optimum-quanto in the Fast plugin venv; repair the plugin"
+                "attn_mode=flash 需要 Fast 插件环境可导入 flash_attn；"
+                "请改用 torch/xformers，或先修复插件环境"
             )
-        if str(config.get("attn_mode", "flash")) == "flash" and not dep.flash_attn_importable:
-            errors.append("attn_mode=flash requested but flash_attn is not importable")
         if torch_compile and dep.vram_total_mb and dep.vram_total_mb < 14000:
-            warnings.append(f"VRAM {dep.vram_total_mb} MB may be low for torch_compile + static_token_count=4096")
+            warnings.append(f"VRAM {dep.vram_total_mb} MB may be low for torch_compile + static_token_count={static_token_count}")
         if config.get("sample_prompts"):
             warnings.append(
                 "sample_prompts is enabled; sampling loads VAE/Qwen3 during training and increases VRAM/time"

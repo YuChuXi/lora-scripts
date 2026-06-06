@@ -24,6 +24,9 @@
 <p align="center">
   <a href="https://github.com/wochenlong/lora-scripts-next/blob/main/NOTICE.md"><b>致谢 & 许可</b></a>
 </p>
+<p align="center">
+  <a href="https://github.com/wochenlong/lora-scripts-next/tree/anima-edit"><b>实验分支：Anima Edit</b></a>
+</p>
 
 ---
 
@@ -44,6 +47,10 @@
 ```
 
 整合包已内置默认 WD 打标模型 **wd14-convnextv2-v2**（约 400 MB，位于 **`tagger-models/wd14/`**），WebUI「数据集打标」页开箱即用。在线下载失败时，可手动把 `model.onnx` 与 `selected_tags.csv` 放进该目录，详见 [`docs/tagger-models.md`](docs/tagger-models.md)。
+
+> **纯命令行 / 云平台训练：** `train.sh` 是旧式 SD/SDXL/Flux 入口。Anima 请用专用脚本：
+> `bash train_anima_by_toml.sh docs/examples/anima-lora-benchmark-kohya.toml`（标准模式，非 Fast）或
+> `bash train_anima_fast_by_toml.sh docs/examples/anima-lora-benchmark-fast.toml`（Fast 插件；先运行 `bash scripts/cli/install_anima_fast.sh`）。
 
 > **要求：** Windows 10/11，NVIDIA 显卡（RTX 20+），~7 GB 磁盘。
 
@@ -78,6 +85,7 @@ bash install_flash_attn.sh
 | 模式 | 模型 / 脚本 | 说明 |
 |------|-------------|------|
 | **Anima LoRA** | LoRA · LoKr · **T-LoRA** | Flash Attention 2 / xformers / SDPA · 约 12GB 显存起 |
+| **Anima Edit** | 图像编辑 LoRA（实验） | 目前在 [`anima-edit`](https://github.com/wochenlong/lora-scripts-next/tree/anima-edit) 分支独立维护 |
 | **Anima LoRA Fast** | 仅 LoRA（进阶插件） | 可选 [anima_lora](https://github.com/sorryhyun/anima_lora) 运行时 · 建议 16GB+ · 见 [`docs/anima-fast.md`](docs/anima-fast.md) |
 | **Anima 全量微调** | 完整 DiT（`anima_train.py`） | 侧栏 **全量微调 → Anima Finetune** · **约 24GB 显存**（4090 档） |
 | SD 1.5 / SDXL LoRA | LoRA · LoHa · LoKr | xformers / SDPA |
@@ -176,7 +184,7 @@ bash install_flash_attn.sh
 | 根目录 | 仅保留契约入口 + 薄转发器，详见 [docs/repo-layout.md](docs/repo-layout.md) |
 | `scripts/portable/` | 整合包启动逻辑 |
 | `scripts/autodl/` | 云 GPU 运维（根目录同名文件为转发） |
-| `scripts/cli/` | 旧式命令行训练（Anima 请用 WebUI） |
+| `scripts/cli/` | 命令行训练入口（普通 SD/SDXL/Flux、Anima 标准、Anima Fast） |
 | `legacy/` | 打标 / notebook 等，日常可忽略 |
 | `doc/local/` | 本地交接与 Issue 草稿（不上传 GitHub） |
 | `docs/` | 公开文档（含 AutoDL 部署等） |

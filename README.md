@@ -24,6 +24,9 @@
 <p align="center">
   <a href="https://github.com/wochenlong/lora-scripts-next/blob/main/NOTICE.md"><b>Credits</b></a>
 </p>
+<p align="center">
+  <a href="https://github.com/wochenlong/lora-scripts-next/tree/anima-edit"><b>Experimental: Anima Edit branch</b></a>
+</p>
 
 ---
 
@@ -44,6 +47,10 @@
 ```
 
 The portable package ships the default WD tagger **wd14-convnextv2-v2** under **`tagger-models/wd14/`** (~400 MB). If Hugging Face download fails, place `model.onnx` and `selected_tags.csv` there manually — see [`docs/tagger-models.md`](docs/tagger-models.md).
+
+> **CLI / cloud training:** `train.sh` is the legacy SD/SDXL/Flux entry. For Anima use the dedicated scripts:
+> `bash train_anima_by_toml.sh docs/examples/anima-lora-benchmark-kohya.toml` (standard, non-Fast) or
+> `bash train_anima_fast_by_toml.sh docs/examples/anima-lora-benchmark-fast.toml` (Fast plugin; run `bash scripts/cli/install_anima_fast.sh` first).
 
 > **Requirements:** Windows 10/11, NVIDIA GPU (RTX 20+), ~7 GB disk.
 
@@ -78,6 +85,7 @@ Python **3.10** recommended. See [Flash Attention 2 docs](docs/flash-attention.m
 | Mode | Model / script | Notes |
 |------|----------------|-------|
 | **Anima LoRA** | LoRA · LoKr · **T-LoRA** | Flash Attention 2 / xformers / SDPA · from ~12 GB VRAM |
+| **Anima Edit** | Image editing LoRA (experimental) | Maintained on the [`anima-edit`](https://github.com/wochenlong/lora-scripts-next/tree/anima-edit) branch |
 | **Anima LoRA Fast** | LoRA only (plugin) | Optional [anima_lora](https://github.com/sorryhyun/anima_lora) runtime · ~16 GB+ · see [`docs/anima-fast.md`](docs/anima-fast.md) |
 | **Anima Finetune** | Full DiT (`anima_train.py`) | Sidebar **全量微调 → Anima Finetune** · **~24 GB VRAM** (4090-class) |
 | SD 1.5 / SDXL LoRA | LoRA · LoHa · LoKr | xformers / SDPA |

@@ -48,6 +48,7 @@ from mikazuki.anima_fast_backend.preflight import run_preflight
 from mikazuki.anima_fast_backend.preview import apply_anima_fast_preview
 from mikazuki.anima_fast_backend.preprocess import prepare_anima_fast_dataset, user_left_resized_empty
 from mikazuki.anima_fast_backend.settings import discover_runtime, feature_enabled
+from mikazuki.anima_fast_backend.source_root import InstallSourceError, resolve_install_source_root
 from mikazuki.app.config import app_config
 from mikazuki.app.models import (APIResponse, APIResponseFail,
                                  APIResponseSuccess, TaggerInterrogateRequest,
@@ -252,13 +253,14 @@ def get_sample_prompts(config: dict, model_train_type: str = "sd-lora") -> Tuple
     default_seed = 42 if use_anima_defaults else 2333
     default_steps = 40 if use_anima_defaults else 24
 
-    positive_prompts = config.pop('positive_prompts', default_positive)
-    negative_prompts = config.pop('negative_prompts', default_negative)
+    positive_prompts = train_utils.normalize_sample_prompt_text(config.pop('positive_prompts', default_positive))
+    negative_prompts = train_utils.normalize_sample_prompt_text(config.pop('negative_prompts', default_negative))
     sample_width = config.pop('sample_width', default_width)
     sample_height = config.pop('sample_height', default_height)
     sample_cfg = config.pop('sample_cfg', default_cfg)
     sample_seed = config.pop('sample_seed', default_seed)
     sample_steps = config.pop('sample_steps', default_steps)
+    sample_sampler = config.pop('sample_sampler', None)
     randomly_choice_prompt = config.pop('randomly_choice_prompt', False)
 
     if randomly_choice_prompt:
@@ -271,11 +273,21 @@ def get_sample_prompts(config: dict, model_train_type: str = "sd-lora") -> Tuple
         try:
             sample_prompt_file = random.choice(txt_files)
             with open(sample_prompt_file, 'r', encoding='utf-8') as f:
-                positive_prompts = f.read()
+                positive_prompts = train_utils.normalize_sample_prompt_text(f.read())
         except IOError:
             log.error(f"读取 {sample_prompt_file} 文件失败")
 
-    return positive_prompts, f'{positive_prompts} --n {negative_prompts}  --w {sample_width} --h {sample_height} --l {sample_cfg}  --s {sample_steps}  --d {sample_seed}'
+    sample_prompts_arg = train_utils.build_sample_prompt_line(
+        positive_prompts,
+        negative_prompts,
+        width=sample_width,
+        height=sample_height,
+        cfg=sample_cfg,
+        steps=sample_steps,
+        seed=sample_seed,
+        sampler=sample_sampler if use_anima_defaults else None,
+    )
+    return positive_prompts, sample_prompts_arg
 
 
 def apply_sdxl_prediction_type(config: dict, model_train_type: str):
@@ -327,6 +339,28 @@ def _cuda_bf16_supported() -> bool:
         return False
 
 
+def _anima_lokr_training(config: dict) -> bool:
+    lora_type = str(config.get("lora_type", "")).strip().lower()
+    if lora_type == "lokr":
+        return True
+
+    network_module = str(config.get("network_module", "")).strip().lower()
+    if network_module == "networks.lokr":
+        return True
+
+    lycoris_algo = str(config.get("lycoris_algo", "")).strip().lower()
+    if lycoris_algo == "lokr":
+        return True
+
+    if network_module == "lycoris.kohya":
+        for item in config.get("network_args") or []:
+            if not isinstance(item, str):
+                continue
+            if item.strip().lower() == "algo=lokr":
+                return True
+    return False
+
+
 def apply_anima_training_defaults(config: dict, model_train_type: str):
     if model_train_type not in ANIMA_TRAIN_TYPES:
         return
@@ -367,6 +401,19 @@ def apply_anima_training_defaults(config: dict, model_train_type: str):
                 "Disabled Anima full half-precision training for optimizer "
                 f"{config.get('optimizer_type')} ({', '.join(disabled)}). "
                 "This keeps trainable LoRA weights in fp32 to reduce loss=nan risk."
+            )
+    elif _anima_lokr_training(config):
+        # LyCORIS LoKr can hit dtype mismatch under mixed precision when adapter
+        # params stay fp32 while activations are bf16/fp16.
+        mixed = str(config.get("mixed_precision", "")).strip().lower()
+        full_key = "full_bf16" if mixed == "bf16" else "full_fp16" if mixed == "fp16" else None
+        if full_key and not config.get(full_key):
+            config[full_key] = True
+            log.info(
+                "Enabled %s for Anima LoKr mixed_precision=%s to keep adapter and "
+                "activation dtypes aligned.",
+                full_key,
+                mixed,
             )
 
     requested_attn = config.get("attn_mode", "")
@@ -425,10 +472,15 @@ def _write_adapted_anima_fast_toml(values: dict, warnings: list[str], run_id: st
 
 
 def _anima_fast_fail_from_preflight(result):
-    return APIResponseFail(
-        message="Anima Fast preflight failed / Anima Fast 预检查失败",
-        data=result.as_dict(),
-    )
+    errors = list(getattr(result, "errors", None) or [])
+    if errors:
+        detail = "; ".join(errors[:4])
+        if len(errors) > 4:
+            detail += f" …（共 {len(errors)} 项）"
+        message = f"Anima Fast 预检查失败：{detail}"
+    else:
+        message = "Anima Fast 预检查失败（未返回具体原因，请修复插件或查看浏览器 Network 响应）"
+    return APIResponseFail(message=message, data=result.as_dict())
 
 
 def _anima_fast_ready_gate():
@@ -503,7 +555,7 @@ async def create_toml_file(request: Request):
             log.error(f"Anima Fast launch failed: {exc}")
             return APIResponseFail(message=f"Anima Fast launch failed: {exc}")
 
-    suggest_cpu_threads = 8 if len(train_utils.get_total_images(config["train_data_dir"])) > 200 else 2
+    suggest_cpu_threads = 8 if len(train_utils.get_total_images(config["train_data_dir"], limit=200)) >= 200 else 2
     trainer_file = trainer_mapping[model_train_type]
     apply_sdxl_prediction_type(config, model_train_type)
     apply_anima_training_defaults(config, model_train_type)
@@ -521,20 +573,24 @@ async def create_toml_file(request: Request):
         if not os.path.exists(prompt_file):
             return APIResponseFail(message=f"Prompt 文件 {prompt_file} 不存在，请检查路径。")
         config["sample_prompts"] = prompt_file
+        train_utils.normalize_sample_prompt_file(prompt_file)
     else:
         try:
             positive_prompt, sample_prompts_arg = get_sample_prompts(config=config, model_train_type=model_train_type)
 
             if positive_prompt is not None and train_utils.is_promopt_like(sample_prompts_arg):
                 sample_prompts_file = os.path.join(autosave_dir, f"{timestamp}-promopt.txt")
-                with open(sample_prompts_file, "w", encoding="utf-8") as f:
-                    f.write(sample_prompts_arg)
+                with open(sample_prompts_file, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(sample_prompts_arg + "\n")
                 config["sample_prompts"] = sample_prompts_file
                 log.info(f"Wrote prompts to file {sample_prompts_file}")
 
         except ValueError as e:
             log.error(f"Error while processing prompts: {e}")
             return APIResponseFail(message=str(e))
+
+    if config.get("sample_prompts"):
+        train_utils.normalize_sample_prompt_file(str(config["sample_prompts"]))
 
     apply_anima_training_defaults(config, model_train_type)
     sanitize_config(config)
@@ -584,7 +640,7 @@ async def anima_lora_plugin_preflight(request: Request):
     except AdapterError as exc:
         return APIResponseFail(message=str(exc))
     result = run_preflight(adapted.values, runtime)
-    result.warnings = [*preview_warnings, *result.warnings]
+    result.warnings = [*adapted.warnings, *preview_warnings, *result.warnings]
     if result.ok:
         return APIResponseSuccess(data=result.as_dict())
     return _anima_fast_fail_from_preflight(result)
@@ -614,11 +670,21 @@ async def anima_lora_plugin_install(request: Request):
     if not feature_enabled():
         return _anima_fast_disabled_response()
     payload: dict = json.loads((await request.body()).decode("utf-8") or "{}")
-    source_root = Path(payload.get("source_root") or os.environ.get("ANIMA_LORA_ROOT") or (Path.cwd().parent / "anima_lora"))
     runtime = _anima_fast_runtime()
     source_commit = str(payload.get("source_commit") or runtime.source_commit or "").strip() or None
     dry_run = payload.get("dry_run", True) is not False
-    layout = default_layout(Path.cwd())
+    project_root = Path.cwd()
+    explicit = payload.get("source_root") or os.environ.get("ANIMA_LORA_ROOT")
+    try:
+        source_root = resolve_install_source_root(
+            project_root,
+            Path(explicit) if explicit else None,
+            source_commit,
+            allow_clone=False,
+        )
+    except InstallSourceError as exc:
+        return APIResponseFail(message=str(exc))
+    layout = default_layout(project_root)
     plan = build_install_plan(source_root, layout, dry_run=dry_run, source_commit=source_commit)
     data = {"plan": plan.as_dict()}
     if dry_run:

@@ -89,6 +89,23 @@ function Clone-SDTrainerGitMetadata {
     }
 }
 
+function Write-PortableBuildMetadata {
+    param(
+        [string]$TrainerDir,
+        [string]$Version
+    )
+    $sha = (& git -C $ProjectRoot rev-parse --short HEAD 2>$null | Select-Object -First 1)
+    if ($sha) { $sha = $sha.Trim() } else { $sha = "unknown" }
+    $utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $path = Join-Path $TrainerDir "PORTABLE_BUILD"
+    @(
+        $sha
+        "built_at=$utc"
+        "version=$Version"
+    ) | Set-Content $path -Encoding UTF8
+    Write-Host "  Wrote PORTABLE_BUILD ($sha)"
+}
+
 function Resolve-TaggerCacheSource {
     param(
         [string]$Explicit,
@@ -375,6 +392,7 @@ foreach ($file in $copyFiles) {
     }
 }
 Clone-SDTrainerGitMetadata -Destination $portableDir
+Write-PortableBuildMetadata -TrainerDir $sdtDir -Version $Version
 Write-Host "  Copied root files"
 Write-Host "  Done" -ForegroundColor Green
 
@@ -544,13 +562,16 @@ Write-Host "  Created install_xformers.bat"
 
 # Root-level utility bat files
 $templateDir = Join-Path $PSScriptRoot "templates"
+$portableTemplateDir = Join-Path $sdtDir "scripts\portable\templates"
+New-Item -ItemType Directory -Path $portableTemplateDir -Force | Out-Null
 foreach ($bat in @("Update-SD-Trainer.bat", "Update-SD-Trainer-Release.bat", "Download-Anima-Model.bat")) {
-    $src = Join-Path $ProjectRoot $bat
+    $src = Join-Path $templateDir $bat
     if (-not (Test-Path $src)) {
-        $src = Join-Path $templateDir $bat
+        $src = Join-Path $ProjectRoot $bat
     }
     if (Test-Path $src) {
         Copy-Item $src -Destination (Join-Path $portableDir $bat)
+        Copy-Item $src -Destination (Join-Path $portableTemplateDir $bat)
         Write-Host "  Created $bat"
     }
 }
