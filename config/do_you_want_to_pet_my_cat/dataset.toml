@@ -1,0 +1,21 @@
+[general]
+resolution = 1536
+enable_bucket = true
+min_bucket_reso = 256
+max_bucket_reso = 2048
+bucket_reso_steps = 64
+bucket_no_upscale = true
+
+[[datasets]]
+batch_size = 3
+
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/do_you_want_to_pet_my_cat"
+  num_repeats = 1
+
+[[datasets]]
+batch_size = 3
+
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/reg"
+  num_repeats = 1

@@ -1,0 +1,33 @@
+[general]
+resolution = 1536
+enable_bucket = true
+min_bucket_reso = 256
+max_bucket_reso = 2048
+bucket_reso_steps = 64
+bucket_no_upscale = true
+
+[[datasets]]
+batch_size = 3
+
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guluqiu/main"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guluqiu/mask"
+  num_repeats = 1
+
+[[datasets]]
+batch_size = 3
+
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guluqiu/head"
+  num_repeats = 2
+
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guluqiu/foot"
+  num_repeats = 1
+
+[[datasets]]
+batch_size = 3
+
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/reg"
+  num_repeats = 1

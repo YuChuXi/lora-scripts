@@ -1,0 +1,25 @@
+[general]
+resolution = 1536
+enable_bucket = true
+min_bucket_reso = 256
+max_bucket_reso = 2048
+bucket_reso_steps = 64
+bucket_no_upscale = true
+
+[[datasets]]
+batch_size = 3
+
+  [[datasets.subsets]]
+  image_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/afd_train"
+  conditioning_data_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/afd_mask"
+  num_repeats = 1
+
+  [[datasets.subsets]]
+  image_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/discord_train"
+  conditioning_data_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/discord_mask"
+  num_repeats = 1
+
+  [[datasets.subsets]]
+  image_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/select_cpd_train"
+  conditioning_data_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/select_cpd_mask"
+  num_repeats = 1

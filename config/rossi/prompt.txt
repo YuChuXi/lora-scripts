@@ -1,0 +1,1 @@
+rossi (arknights), wolf girl, blonde hair, claw pose, full body, hood up, hooded red cloak, tongue out, wariza, profile --n worst quality, low quality, score_1, score_2, score_3, artist name, jpeg artifacts  --w 1024 --h 1024 --l 4  --s 30  --d 42
