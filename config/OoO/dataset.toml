@@ -1,0 +1,24 @@
+[general]
+resolution = 1536
+enable_bucket = true
+min_bucket_reso = 256
+max_bucket_reso = 2048
+bucket_reso_steps = 64
+bucket_no_upscale = true
+
+[[datasets]]
+batch_size = 3
+
+  # chibi  explicit  general  sensitive
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/meme/OoO"
+  #conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/wangxiangmao/mask"
+  num_repeats = 1
+
+
+[[datasets]]
+batch_size = 3
+
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/128_1"
+  num_repeats = 1

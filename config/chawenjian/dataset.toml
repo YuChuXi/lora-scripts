@@ -29,5 +29,5 @@ batch_size = 3
 batch_size = 3
 
   [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/reg"
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
   num_repeats = 1

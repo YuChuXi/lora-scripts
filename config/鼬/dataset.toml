@@ -11,20 +11,8 @@ batch_size = 3
 
   # chibi  explicit  general  sensitive
   [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/rossi/general"
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/meme/鼬"
   #conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/wangxiangmao/mask"
-  num_repeats = 1
-
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/rossi/explicit"
-  num_repeats = 1
-
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/rossi/sensitive"
-  num_repeats = 1
-
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/rossi/chibi"
   num_repeats = 1
 
 
