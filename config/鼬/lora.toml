@@ -29,8 +29,7 @@ network_dim = 32
 network_alpha = 32
 network_module = "networks.lora_anima"
 network_dropout = 0.1
-# rank_dropout = 0.1
-# module_dropout = 0.1
+# network_args = ["rank_dropout=0.1", "module_dropout=0.1"]
 sample_at_first = true
 sample_every_n_epochs = 1
 log_with = "tensorboard"
