@@ -9,7 +9,7 @@ weighting_scheme = "logit_normal"
 attn_mode = "flash"
 prior_loss_weight = 1
 resolution = "1536"
-output_name = "bairi_anima"
+output_name = "amashiro_natsuki_anima"
 output_dir = "./output"
 save_model_as = "safetensors"
 save_precision = "bf16"
@@ -47,5 +47,5 @@ cache_latents_to_disk = true
 max_data_loader_n_workers = 0
 optimizer_args = ["weight_decay=0.001"]
 masked_loss = true
-sample_prompts = "./config/bairi/prompt.txt"
-dataset_config = "./config/bairi/dataset.toml"
+sample_prompts = "./config/amashiro_natsuki/prompt.txt"
+dataset_config = "./config/amashiro_natsuki/dataset.toml"
