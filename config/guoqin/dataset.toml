@@ -1,0 +1,23 @@
+[general]
+resolution = 1536
+enable_bucket = true
+min_bucket_reso = 256
+max_bucket_reso = 2048
+bucket_reso_steps = 64
+bucket_no_upscale = true
+
+[[datasets]]
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guoqin/main"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guoqin/mask"
+  num_repeats = 6
+
+# [[datasets]]
+#   [[datasets.subsets]]
+#   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/amashiro_natsuki/head"
+#   num_repeats = 1
+
+[[datasets]]
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
+  num_repeats = 1
