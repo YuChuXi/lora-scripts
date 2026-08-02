@@ -3,9 +3,7 @@ vae = "/media/yuchuxi/Data/Servers/ComfyUI/models/vae/qwen_image_vae.safetensors
 qwen3 = "/media/yuchuxi/Data/Servers/ComfyUI/models/text_encoders/qwen_3_06b_base.safetensors"
 qwen3_max_token_length = 1024
 t5_max_token_length = 1024
-timestep_sampling = "sigmoid"
-sigmoid_scale = 1.3
-weighting_scheme = "logit_normal"
+timestep_sampling = "uniform"
 attn_mode = "flash"
 prior_loss_weight = 1
 resolution = "1536"
@@ -19,8 +17,8 @@ train_batch_size = 2
 gradient_checkpointing = true
 gradient_accumulation_steps = 4
 network_train_unet_only = true
-learning_rate = 5e-05
-unet_lr = 5e-05
+learning_rate = 1e-05
+unet_lr = 1e-05
 text_encoder_lr = 0
 lr_scheduler = "cosine"
 lr_warmup_steps = 100
@@ -29,7 +27,19 @@ network_dim = 16
 network_alpha = 16
 network_module = "networks.lora_anima"
 network_dropout = 0.1
-network_args = ["rank_dropout=0.1", "module_dropout=0.0"]
+network_args = [
+    "rank_dropout=0.1", 
+    "module_dropout=0.1", 
+    "network_reg_lrs=r'.*blocks\\.19\\..*'=2e-05",
+    "network_reg_lrs=r'.*blocks\\.20\\..*'=3e-05",
+    "network_reg_lrs=r'.*blocks\\.21\\..*'=4e-05",
+    "network_reg_lrs=r'.*blocks\\.22\\..*'=5e-05",
+    "network_reg_lrs=r'.*blocks\\.23\\..*'=6e-05",
+    "network_reg_lrs=r'.*blocks\\.24\\..*'=7e-05",
+    "network_reg_lrs=r'.*blocks\\.25\\..*'=8e-05",
+    "network_reg_lrs=r'.*blocks\\.26\\..*'=9e-05",
+    "network_reg_lrs=r'.*blocks\\.27\\..*'=1e-04",
+]
 sample_at_first = true
 sample_every_n_steps = 50
 log_with = "tensorboard"

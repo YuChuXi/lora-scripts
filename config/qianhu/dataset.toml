@@ -10,12 +10,12 @@ bucket_no_upscale = true
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/main"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/mask"
-  num_repeats = 5
+  num_repeats = 4
 
-# [[datasets]]
-#   [[datasets.subsets]]
-#   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/amashiro_natsuki/head"
-#   num_repeats = 1
+[[datasets]]
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/sub"
+  num_repeats = 4
 
 [[datasets]]
   [[datasets.subsets]]

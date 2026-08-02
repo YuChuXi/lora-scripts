@@ -1,1 +1,1 @@
-qianhu, Vulpepuella megalura, fox girl, loli, black hair, 1girl --n worst quality, low quality, score_1, score_2, score_3, artist name, jpeg artifacts  --w 1024 --h 1024 --l 4  --s 30  --d 42
+score_9, qianhu, 1girl, black hair, fox girl, solo, dress, looking at viewer, blurry, sitting, multiple hair bows, spiked halo behind head --n worst quality, low quality, score_1, score_2, score_3, artist name, jpeg artifacts  --w 1024 --h 1024 --l 4  --s 30  --d 42
