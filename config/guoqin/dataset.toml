@@ -9,7 +9,7 @@ bucket_no_upscale = true
 [[datasets]]
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guoqin/main"
-  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guoqin/mask"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guoqin/mask/main"
   num_repeats = 6
 
 # [[datasets]]

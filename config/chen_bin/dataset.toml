@@ -9,7 +9,7 @@ bucket_no_upscale = true
 [[datasets]]
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chen_bin/main"
-  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chen_bin/mask"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chen_bin/mask/main"
   num_repeats = 1
 
 [[datasets]]

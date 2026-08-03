@@ -9,7 +9,7 @@ bucket_no_upscale = true
 [[datasets]]
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/amashiro_natsuki/main_regan"
-  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/amashiro_natsuki/mask_regan"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/amashiro_natsuki/mask/main_regan"
   num_repeats = 1
 
 [[datasets]]

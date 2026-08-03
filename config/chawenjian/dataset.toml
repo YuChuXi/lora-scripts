@@ -11,7 +11,7 @@ batch_size = 3
 
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/wd14"
-  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/mask"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/mask/main"
   num_repeats = 1
 
 [[datasets]]

@@ -9,7 +9,7 @@ bucket_no_upscale = true
 [[datasets]]
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/tentacle_clothes/main"
-  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/tentacle_clothes/mask"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/tentacle_clothes/mask/main"
   num_repeats = 1
 
 # [[datasets]]

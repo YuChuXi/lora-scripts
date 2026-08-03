@@ -12,7 +12,7 @@ batch_size = 3
   # chibi  explicit  general  sensitive
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/questioning_statue/main"
-  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/questioning_statue/mask"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/questioning_statue/mask/main"
   num_repeats = 2
 
 

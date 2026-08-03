@@ -11,15 +11,15 @@ batch_size = 3
 
   [[datasets.subsets]]
   image_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/afd_train"
-  conditioning_data_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/afd_mask"
+  conditioning_data_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/afd_mask/main"
   num_repeats = 1
 
   [[datasets.subsets]]
   image_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/discord_train"
-  conditioning_data_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/discord_mask"
+  conditioning_data_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/discord_mask/main"
   num_repeats = 1
 
   [[datasets.subsets]]
   image_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/select_cpd_train"
-  conditioning_data_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/select_cpd_mask"
+  conditioning_data_dir = "/media/yuchuxi/WD1/BiliBili/YSM/datasets/select_cpd_mask/main"
   num_repeats = 1

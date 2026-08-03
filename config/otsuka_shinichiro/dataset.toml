@@ -11,7 +11,7 @@ batch_size = 3
 
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/otsuka_shinichiro/main"
-  #conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/otsuka_shinichiro/mask"
+  #conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/otsuka_shinichiro/mask/main"
   num_repeats = 1
 
   [[datasets.subsets]]
