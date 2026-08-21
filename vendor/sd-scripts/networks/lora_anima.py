@@ -69,6 +69,7 @@ class LoRAModule(torch.nn.Module):
         self.dropout = dropout
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
+        self.grad_norms = None  # cached per-rank approximate gradient norms, set by update_grad_norms()
 
     def apply_to(self):
         self.org_forward = self.org_module.forward
@@ -111,6 +112,35 @@ class LoRAModule(torch.nn.Module):
         lx = self.lora_up(lx)
 
         return org_forwarded + lx * self.multiplier * scale
+
+    @torch.no_grad()
+    def update_grad_norms(self):
+        """Compute and cache per-rank approximate gradient norms of the LoRA delta matrix.
+
+        Computes ``torch.norm(scale * (lora_up @ lora_down.grad + lora_up.grad @ lora_down), dim=1)``
+        as an approximation of the gradient magnitude contributed by this LoRA module.
+
+        Called by ``LoRANetwork.update_grad_norms()``, which is invoked from
+        ``train_network.py`` after gradient clipping and before each optimizer step;
+        the aggregated values are written to the ``norm/avg_grad_norm`` metric
+        via ``LoRANetwork.grad_norms()``.
+        """
+        if self.training is False:
+            return
+
+        lora_down_grad = None
+        lora_up_grad = None
+
+        for name, param in self.named_parameters():
+            if name == "lora_down.weight":
+                lora_down_grad = param.grad
+            elif name == "lora_up.weight":
+                lora_up_grad = param.grad
+
+        if lora_down_grad is not None and lora_up_grad is not None:
+            with torch.autocast(device_type=self.device.type):
+                approx_grad = self.scale * ((self.lora_up.weight @ lora_down_grad) + (lora_up_grad @ self.lora_down.weight))
+                self.grad_norms = torch.norm(approx_grad, dim=1, keepdim=True)
 
     @property
     def device(self):
@@ -572,6 +602,52 @@ class LoRANetwork(torch.nn.Module):
     def set_enabled(self, is_enabled):
         for lora in self.text_encoder_loras + self.unet_loras:
             lora.enabled = is_enabled
+
+    def update_grad_norms(self):
+        """Update cached approximate gradient norms of every LoRA module.
+
+        Called from ``train_network.py`` after gradient clipping and before
+        each optimizer step (guarded by ``hasattr`` there).
+        """
+        for lora in self.text_encoder_loras + self.unet_loras:
+            lora.update_grad_norms()
+
+    def grad_norms(self) -> Optional[torch.Tensor]:
+        """Aggregate per-module approximate gradient norms for logging.
+
+        Returns a stacked tensor of per-module mean norms, or None when no
+        module has computed norms. Consumed by ``train_network.py`` to build
+        the ``norm/avg_grad_norm`` metric for tensorboard/wandb.
+        """
+        grad_norms = []
+        for lora in self.text_encoder_loras + self.unet_loras:
+            if hasattr(lora, "grad_norms") and lora.grad_norms is not None:
+                grad_norms.append(lora.grad_norms.mean(dim=0))
+        return torch.stack(grad_norms) if len(grad_norms) > 0 else None
+
+    def weight_norms(self) -> Optional[torch.Tensor]:
+        """Aggregate per-module weight norms when available.
+
+        Anima LoRA modules do not compute weight norms (no GGPO support), so
+        this returns None. The method must exist because ``train_network.py``
+        gates the whole norm-logging block on ``hasattr(network, "weight_norms")``.
+        """
+        weight_norms = []
+        for lora in self.text_encoder_loras + self.unet_loras:
+            if hasattr(lora, "weight_norms") and lora.weight_norms is not None:
+                weight_norms.append(lora.weight_norms.mean(dim=0))
+        return torch.stack(weight_norms) if len(weight_norms) > 0 else None
+
+    def combined_weight_norms(self) -> Optional[torch.Tensor]:
+        """Aggregate per-module combined weight norms when available.
+
+        See ``weight_norms``: always returns None for Anima LoRA.
+        """
+        combined_weight_norms = []
+        for lora in self.text_encoder_loras + self.unet_loras:
+            if hasattr(lora, "combined_weight_norms") and lora.combined_weight_norms is not None:
+                combined_weight_norms.append(lora.combined_weight_norms.mean(dim=0))
+        return torch.stack(combined_weight_norms) if len(combined_weight_norms) > 0 else None
 
     def load_weights(self, file):
         if os.path.splitext(file)[1] == ".safetensors":

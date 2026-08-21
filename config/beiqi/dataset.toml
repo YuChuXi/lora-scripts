@@ -7,10 +7,25 @@ bucket_reso_steps = 64
 bucket_no_upscale = true
 
 [[datasets]]
+resolution = 1536
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/beiqi/main"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/beiqi/mask/main"
-  num_repeats = 7
+  num_repeats = 4
+
+[[datasets]]
+resolution = 1024
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/beiqi/main"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/beiqi/mask/main"
+  num_repeats = 4
+
+[[datasets]]
+resolution = 512
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/beiqi/main"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/beiqi/mask/main"
+  num_repeats = 4
 
 # [[datasets]]
 #   [[datasets.subsets]]
@@ -18,6 +33,12 @@ bucket_no_upscale = true
 #   num_repeats = 1
 
 [[datasets]]
+resolution = 1536
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
-  num_repeats = 1
+
+[[datasets]]
+resolution = 1024
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_2"
+

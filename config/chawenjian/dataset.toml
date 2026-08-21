@@ -1,33 +1,45 @@
 [general]
-resolution = 1536
 enable_bucket = true
 min_bucket_reso = 256
-max_bucket_reso = 2048
+max_bucket_reso = 1536
 bucket_reso_steps = 64
 bucket_no_upscale = true
 
+# ============ main（主体图 + mask，原 num_repeats=4 → 3 档分辨率）============
 [[datasets]]
-batch_size = 3
-
+resolution = 1536
   [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/wd14"
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/main"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/mask/main"
-  num_repeats = 1
 
 [[datasets]]
-batch_size = 3
-
+resolution = 1024
   [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/head_wd14"
-  num_repeats = 2
-
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/foot_wd14"
-  num_repeats = 1
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/main"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/mask/main"
 
 [[datasets]]
-batch_size = 3
+resolution = 512
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/main"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/mask/main"
 
+[[datasets]]
+resolution = 1536
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/head"
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/foot"
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
-  num_repeats = 1
+
+[[datasets]]
+resolution = 1024
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/head"
+  num_repeats = 2
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chawenjian/foot"
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_2"
+
