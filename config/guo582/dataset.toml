@@ -1,33 +1,62 @@
 [general]
-resolution = 1536
 enable_bucket = true
 min_bucket_reso = 256
-max_bucket_reso = 2048
+max_bucket_reso = 1536
 bucket_reso_steps = 64
 bucket_no_upscale = true
 
 [[datasets]]
-batch_size = 3
-
+resolution = 1536
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/main"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/mask/main"
   num_repeats = 1
 
-[[datasets]]
-batch_size = 3
 
+[[datasets]]
+resolution = 1024
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/main"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/mask/main"
+  num_repeats = 1
+
+
+[[datasets]]
+resolution = 512
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/main"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/mask/main"
+  num_repeats = 1
+
+
+[[datasets]]
+resolution = 1536
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/head"
-  num_repeats = 2
+  num_repeats = 1
 
+
+[[datasets]]
+resolution = 1024
   [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/foot"
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/head"
+  num_repeats = 1
+
+
+[[datasets]]
+resolution = 512
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/head"
   num_repeats = 1
 
 [[datasets]]
-batch_size = 3
+resolution = 1536
 
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/reg"
-  num_repeats = 1
+[[datasets.subsets]]
+image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
+
+[[datasets]]
+resolution = 1024
+
+[[datasets.subsets]]
+image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_2"
