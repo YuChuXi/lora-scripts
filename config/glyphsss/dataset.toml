@@ -12,12 +12,14 @@ resolution = 1536
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/glyphsss/mask/main"
   num_repeats = 2
 
+
 [[datasets]]
 resolution = 1024
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/glyphsss/main"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/glyphsss/mask/main"
   num_repeats = 3
+
 
 [[datasets]]
 resolution = 512
@@ -26,14 +28,14 @@ resolution = 512
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/glyphsss/mask/main"
   num_repeats = 2
 
-
 [[datasets]]
 resolution = 1536
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
+
+[[datasets.subsets]]
+image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
 
 [[datasets]]
 resolution = 1024
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_2"
 
+[[datasets.subsets]]
+image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_2"

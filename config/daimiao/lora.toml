@@ -44,6 +44,6 @@ cache_latents_to_disk = true
 max_data_loader_n_workers = 0
 optimizer_args = ["weight_decay=0.001"]
 masked_loss = true
-output_name = "glyphsss_anima"
-sample_prompts = "/home/yuchuxi/Projects/Experiments/Dataset/lora-scripts/config/glyphsss/prompt.txt"
-dataset_config = "/home/yuchuxi/Projects/Experiments/Dataset/lora-scripts/config/glyphsss/dataset.toml"
+output_name = "daimiao_anima"
+sample_prompts = "/home/yuchuxi/Projects/Experiments/Dataset/lora-scripts/config/daimiao/prompt.txt"
+dataset_config = "/home/yuchuxi/Projects/Experiments/Dataset/lora-scripts/config/daimiao/dataset.toml"

@@ -1,1 +1,1 @@
-@glyphsss,  --n worst quality, low quality, score_1, score_2, score_3, artist name, jpeg artifacts  --w 1024 --h 1024 --l 4  --s 30  --d 42
+@glyphsss, blush, long hair, 1girl, looking at viewer, animal ears, solo, hair between eyes, hair ornament, loli, tail,  --n worst quality, low quality, score_1, score_2, score_3, artist name, jpeg artifacts  --w 1024 --h 1024 --l 4  --s 30  --d 42
