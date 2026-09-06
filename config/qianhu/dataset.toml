@@ -1,8 +1,7 @@
 [general]
-resolution = 1536
 enable_bucket = true
 min_bucket_reso = 256
-max_bucket_reso = 2048
+max_bucket_reso = 1536
 bucket_reso_steps = 64
 bucket_no_upscale = true
 
@@ -12,6 +11,15 @@ resolution = 1536
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/main"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/mask/main"
   num_repeats = 2
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/gpt"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/mask/gpt"
+  num_repeats = 2
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/sub"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/mask/sub"
+  num_repeats = 2
+
 
 [[datasets]]
 resolution = 1024
@@ -19,40 +27,39 @@ resolution = 1024
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/main"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/mask/main"
   num_repeats = 2
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/gpt"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/mask/gpt"
+  num_repeats = 2
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/sub"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/mask/sub"
+  num_repeats = 2
+
 
 [[datasets]]
 resolution = 512
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/main"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/mask/main"
-  num_repeats = 2
+  num_repeats = 1
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/gpt"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/mask/gpt"
+  num_repeats = 1
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/sub"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/mask/sub"
+  num_repeats = 1
 
 [[datasets]]
 resolution = 1536
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/sub"
-  num_repeats = 2
+
+[[datasets.subsets]]
+image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
 
 [[datasets]]
 resolution = 1024
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/sub"
-  num_repeats = 2
 
-[[datasets]]
-resolution = 512
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/qianhu/sub"
-  num_repeats = 2
-
-
-[[datasets]]
-resolution = 1536
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
-
-[[datasets]]
-resolution = 1024
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_2"
-
+[[datasets.subsets]]
+image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_2"
