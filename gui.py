@@ -115,7 +115,9 @@ def run_tag_editor(port: int):
         f"sys.argv = [{str(launch_script)!r}] + {tag_args!r};"
         f"exec(compile(open({str(launch_script)!r}).read(), {str(launch_script)!r}, 'exec'))"
     )
-    subprocess.Popen([sys.executable, "-s", "-c", bootstrap])
+    # 不加 -s：隔离式环境（portable）依赖全部位于环境内，而继承式环境的依赖
+    # 可能位于用户 site-packages（如 torch），-s 会使子进程依赖链断裂。
+    subprocess.Popen([sys.executable, "-c", bootstrap])
 
 
 def launch():
