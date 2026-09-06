@@ -49,3 +49,73 @@ class InstallAnimaFastCliTests(unittest.TestCase):
             ):
                 rc = cli.main(["--project-root", str(project), "--dry-run"])
             self.assertEqual(rc, 0)
+
+    def test_cli_install_uses_shared_targets_that_include_iopath(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            (project / "gui.py").write_text("", encoding="utf-8")
+            (project / "config").mkdir()
+            (project / "config" / "anima_fast_backend.toml").write_text("[backend]\n", encoding="utf-8")
+            env_dir = project / "config" / "anima_fast_environment"
+            env_dir.mkdir()
+            (env_dir / "anima-constraints-cu130.txt").write_text("iopath==0.1.10\n", encoding="utf-8")
+            (env_dir / "anima-overrides-cu130.txt").write_text("numpy>=2\n", encoding="utf-8")
+            source = project / "upstream"
+            source.mkdir()
+            (source / "train.py").write_text("print('ok')\n", encoding="utf-8")
+
+            def fake_install(_plan, _log):
+                from mikazuki.anima_fast_backend.environment import AuditResult, anima_pip_dependency_targets
+
+                self.assertIn("iopath==0.1.10", anima_pip_dependency_targets())
+                return AuditResult(ok=True)
+
+            with mock.patch.object(cli, "resolve_source_root", return_value=source), mock.patch.object(
+                cli.os, "chdir"
+            ), mock.patch.object(
+                cli, "ensure_uv", return_value="uv"
+            ), mock.patch(
+                "mikazuki.anima_fast_backend.settings.feature_enabled", return_value=True
+            ), mock.patch(
+                "mikazuki.anima_fast_backend.settings.discover_runtime",
+                return_value=mock.Mock(source_commit=""),
+            ), mock.patch(
+                "mikazuki.anima_fast_backend.environment.install_environment",
+                side_effect=fake_install,
+            ):
+                rc = cli.main(["--project-root", str(project)])
+
+            self.assertEqual(rc, 0)
+
+    def test_windows_bat_delegates_to_cli_installer(self):
+        bat = ROOT / "scripts" / "cli" / "install_anima_fast.bat"
+        content = bat.read_text(encoding="utf-8")
+
+        self.assertIn("install_anima_fast.py", content)
+
+
+class EnsureUvTests(unittest.TestCase):
+    def test_returns_existing_uv_on_path(self):
+        with mock.patch.object(cli.shutil, "which", return_value="/usr/bin/uv"), mock.patch.object(
+            cli.subprocess, "run"
+        ) as run:
+            result = cli.ensure_uv(lambda _m: None)
+        self.assertEqual(result, "/usr/bin/uv")
+        run.assert_not_called()
+
+    def test_uses_uv_next_to_interpreter_without_pip(self):
+        original_path = cli.os.environ.get("PATH", "")
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                bindir = Path(td)
+                exe = bindir / cli._uv_exe_name()
+                exe.write_text("", encoding="utf-8")
+                with mock.patch.object(cli.shutil, "which", return_value=None), mock.patch.object(
+                    cli, "_uv_bin_dir_candidates", return_value=[bindir]
+                ), mock.patch.object(cli.subprocess, "run") as run:
+                    result = cli.ensure_uv(lambda _m: None)
+                run.assert_not_called()
+                self.assertEqual(result, str(exe))
+                self.assertIn(str(bindir), cli.os.environ["PATH"])
+        finally:
+            cli.os.environ["PATH"] = original_path

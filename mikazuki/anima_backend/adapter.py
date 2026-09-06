@@ -193,6 +193,21 @@ LYCORIS_NETWORK_ARG_MAP: dict[str, str] = {
     "dropout": "dropout",
 }
 
+LOKR_TRAIN_NORM_WARNING = (
+    "LyCORIS train_norm is disabled for Anima LoKr because LyCORIS NormModule "
+    "can crash on Anima norm layers without affine weights during preview sampling."
+)
+LOKR_BF16_DORA_WARNING = (
+    "Anima LoKr mixed_precision=bf16 with DoRA/weight_decomposition can be less "
+    "stable on some LyCORIS/PyTorch combinations. The trainer keeps your "
+    "dora_wd/weight_decomposition settings unchanged."
+)
+LOKR_FULL_MATRIX_WARNING = (
+    "Anima LoKr full_matrix=true is a high-risk stability mode. Consider "
+    "disabling full_bf16/full_fp16 and setting scale_weight_norms=1 if the first "
+    "epoch becomes unstable. The trainer keeps your parameters unchanged."
+)
+
 
 def _is_empty_value(value: Any) -> bool:
     """Check if a value is empty/invalid (None, NaN, 'undefined', 'null', '')."""
@@ -244,6 +259,52 @@ def _normalize_network_args(values: Any) -> list[str]:
     return ordered
 
 
+def _apply_lr_fallback(source: dict[str, Any]) -> None:
+    learning_rate = source.get("learning_rate")
+    if _is_empty_value(learning_rate):
+        return
+    for key in ("unet_lr", "text_encoder_lr"):
+        if _is_empty_value(source.get(key)):
+            source[key] = learning_rate
+
+
+def _network_args_use_lokr(network_args: list[str]) -> bool:
+    for item in network_args:
+        if not isinstance(item, str) or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        if key.strip().lower() == "algo" and value.strip().lower() == "lokr":
+            return True
+    return False
+
+
+def _network_args_has_truthy_arg(network_args: list[str], arg_key: str) -> bool:
+    target = arg_key.strip().lower()
+    for item in network_args:
+        if not isinstance(item, str) or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        if key.strip().lower() != target:
+            continue
+        if str(value).strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
+def _strip_arg(network_args: list[str], arg_key: str) -> tuple[list[str], bool]:
+    stripped: list[str] = []
+    removed = False
+    target = arg_key.strip().lower()
+    for item in network_args:
+        if isinstance(item, str) and "=" in item:
+            key, _value = item.split("=", 1)
+            if key.strip().lower() == target:
+                removed = True
+                continue
+        stripped.append(item)
+    return stripped, removed
+
+
 def adapt_anima_config(
     config: dict[str, Any], *, finetune: bool = False
 ) -> tuple[dict[str, Any], list[str]]:
@@ -270,6 +331,8 @@ def adapt_anima_config(
             source["network_args"] = normalized_network_args
         elif "network_args" in source:
             source.pop("network_args", None)
+
+        _apply_lr_fallback(source)
 
     # LyCORIS default preset does not include Anima module class names, which may
     # produce zero trainable modules for LoKr. Inject Anima-specific preset unless
@@ -298,6 +361,20 @@ def adapt_anima_config(
             if _is_empty_value(value):
                 continue
             network_args.append(f"{arg_key}={value}")
+        if _network_args_use_lokr(network_args):
+            network_args, removed_train_norm = _strip_arg(network_args, "train_norm")
+            if removed_train_norm:
+                warnings.append(LOKR_TRAIN_NORM_WARNING)
+            if _network_args_has_truthy_arg(network_args, "full_matrix"):
+                warnings.append(LOKR_FULL_MATRIX_WARNING)
+            if (
+                str(source.get("mixed_precision", "")).strip().lower() == "bf16"
+                and (
+                    _network_args_has_truthy_arg(network_args, "dora_wd")
+                    or _network_args_has_truthy_arg(network_args, "weight_decomposition")
+                )
+            ):
+                warnings.append(LOKR_BF16_DORA_WARNING)
         if network_args:
             source["network_args"] = network_args
 

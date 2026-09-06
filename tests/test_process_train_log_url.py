@@ -8,10 +8,39 @@ stub out the heavy modules before importing ``mikazuki.process``.
 from __future__ import annotations
 
 import importlib
+import enum
 import sys
 import types
 import unittest
 from unittest import mock
+
+
+# sys.modules keys this module replaces with stand-ins (plus mikazuki.process,
+# imported below). Snapshotted before stubbing and restored in tearDownModule
+# so stubs do not leak into later tests in the same process (see issue #95).
+_STUBBED_MODULE_NAMES = (
+    "mikazuki.app",
+    "mikazuki.app.models",
+    "mikazuki.log",
+    "mikazuki.tasks",
+    "mikazuki.launch_utils",
+    "mikazuki.process",
+)
+_SAVED_MODULES: dict[str, types.ModuleType | None] = {}
+
+
+def _snapshot_modules() -> None:
+    for name in _STUBBED_MODULE_NAMES:
+        _SAVED_MODULES[name] = sys.modules.get(name)
+
+
+def _restore_modules() -> None:
+    for name, original in _SAVED_MODULES.items():
+        if original is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
+    _SAVED_MODULES.clear()
 
 
 def _install_stub_modules() -> None:
@@ -40,6 +69,11 @@ def _install_stub_modules() -> None:
     # mikazuki.tasks — provide a stub ``tm`` with ``create_task``.
     tasks_mod = types.ModuleType("mikazuki.tasks")
     tasks_mod.tm = mock.MagicMock()
+
+    class _TaskStatus(enum.Enum):  # process.py only reads TaskStatus.QUEUED
+        QUEUED = 5
+
+    tasks_mod.TaskStatus = _TaskStatus
     sys.modules["mikazuki.tasks"] = tasks_mod
 
     # mikazuki.launch_utils — ``base_dir_path`` is imported but not used in the
@@ -49,8 +83,15 @@ def _install_stub_modules() -> None:
     sys.modules["mikazuki.launch_utils"] = launch_mod
 
 
+# Install stubs only long enough to import ``mikazuki.process``; restore
+# sys.modules immediately so the stubs do not leak into later test modules
+# imported in the same collection pass (issue #95).
+_snapshot_modules()
 _install_stub_modules()
-process = importlib.import_module("mikazuki.process")
+try:
+    process = importlib.import_module("mikazuki.process")
+finally:
+    _restore_modules()
 
 
 class BuildTrainLogUrlsTests(unittest.TestCase):
@@ -145,6 +186,93 @@ class TruthyEnvTests(unittest.TestCase):
             with self.subTest(value=value):
                 with mock.patch.dict("os.environ", {"MIKAZUKI_TEST_FLAG": value}, clear=False):
                     self.assertFalse(process._truthy_env("MIKAZUKI_TEST_FLAG"))
+
+
+class RunTrainMetadataTests(unittest.TestCase):
+    def test_run_train_returns_metadata_for_observability(self):
+        task = mock.MagicMock()
+        task.task_id = "task-meta"
+
+        with mock.patch.object(process.tm, "create_task", return_value=task) as create_task, \
+                mock.patch.object(process, "_announce_train_log"), \
+                mock.patch.object(process, "build_train_log_urls", return_value={
+                    "base": "http://127.0.0.1:28000",
+                    "viewer": "http://127.0.0.1:28000/train-log?task_id=task-meta",
+                    "stream": "http://127.0.0.1:28000/api/train/log/stream/task-meta",
+                }), \
+                mock.patch.object(process, "read_mixed_precision_from_train_toml", return_value="bf16"):
+            response = process.run_train(
+                "config/autosave/test.toml",
+                "./scripts/stable/train_network.py",
+                gpu_ids=["0"],
+                cpu_threads=4,
+            )
+
+        self.assertEqual(response.status, "success")
+        create_task.assert_called_once()
+        metadata = create_task.call_args.kwargs["metadata"]
+        self.assertEqual(metadata["backend"], "standard")
+        self.assertEqual(metadata["trainer_file"], "./scripts/stable/train_network.py")
+        self.assertEqual(metadata["mixed_precision"], "bf16")
+        self.assertEqual(metadata["cpu_threads"], 4)
+        self.assertEqual(metadata["gpu_ids"], ["0"])
+        self.assertIn("command", metadata)
+        self.assertEqual(response.data["metadata"], metadata)
+        self.assertEqual(response.data["config_path"], metadata["config_path"])
+        self.assertEqual(response.data["trainer_file"], "./scripts/stable/train_network.py")
+
+    def test_run_train_preserves_extra_metadata_warnings(self):
+        task = mock.MagicMock()
+        task.task_id = "task-warning"
+
+        with mock.patch.object(process.tm, "create_task", return_value=task) as create_task, \
+                mock.patch.object(process, "_announce_train_log"), \
+                mock.patch.object(process, "build_train_log_urls", return_value={
+                    "base": "http://127.0.0.1:28000",
+                    "viewer": "http://127.0.0.1:28000/train-log?task_id=task-warning",
+                    "stream": "http://127.0.0.1:28000/api/train/log/stream/task-warning",
+                }), \
+                mock.patch.object(process, "read_mixed_precision_from_train_toml", return_value="bf16"):
+            response = process.run_train(
+                "config/autosave/test.toml",
+                "./scripts/dev/anima_train_network.py",
+                cpu_threads=2,
+                metadata={"warnings": ["guardrail active"]},
+            )
+
+        metadata = create_task.call_args.kwargs["metadata"]
+        self.assertEqual(response.status, "success")
+        self.assertEqual(metadata["warnings"], ["guardrail active"])
+        self.assertEqual(response.data["metadata"]["warnings"], ["guardrail active"])
+
+    def test_run_train_queued_when_compute_lane_busy(self):
+        # New scheduling contract: run_train never rejects; a busy compute lane
+        # yields a QUEUED task and a queued response instead of an error.
+        task = mock.MagicMock()
+        task.task_id = "task-queued"
+        task.status = process.TaskStatus.QUEUED
+
+        with mock.patch.object(process.tm, "create_task", return_value=task), \
+                mock.patch.object(process.tm, "submit") as submit, \
+                mock.patch.object(process, "_announce_train_log"), \
+                mock.patch.object(process, "build_train_log_urls", return_value={
+                    "base": "http://127.0.0.1:28000",
+                    "viewer": "http://127.0.0.1:28000/train-log?task_id=task-queued",
+                    "stream": "http://127.0.0.1:28000/api/train/log/stream/task-queued",
+                }), \
+                mock.patch.object(process, "read_mixed_precision_from_train_toml", return_value=None):
+            response = process.run_train(
+                "config/autosave/test.toml",
+                "./scripts/stable/train_network.py",
+                gpu_ids=None,
+                cpu_threads=2,
+            )
+
+        self.assertEqual(response.status, "success")
+        self.assertTrue(response.data["queued"])
+        self.assertIn("队列", response.message)
+        submit.assert_called_once_with(task)
+        self.assertIn("config_path", response.data)
 
 
 if __name__ == "__main__":

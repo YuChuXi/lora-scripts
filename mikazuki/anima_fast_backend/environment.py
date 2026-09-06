@@ -13,7 +13,13 @@ import time
 import threading
 import uuid
 
-from mikazuki.tasks import Task, tm
+from mikazuki.download_sources import (
+    DownloadSources,
+    apply_github_prefix,
+    install_process_env,
+    pytorch_extra_index_url,
+)
+from mikazuki.tasks import LANE_MAINTENANCE, tm
 from mikazuki.train_log_hub import hub as train_log_hub
 
 from .extension_state import (
@@ -38,6 +44,19 @@ FLASH_ATTN_LINUX_CU130_URL = (
     "flash_attn-2.8.3%2Bcu130torch2.11-cp313-cp313-linux_x86_64.whl"
 )
 
+# Optional, masking-only dependencies that core LoRA training never imports.
+# sam3 is a heavy git build (facebookresearch/sam3) whose HF weights are gated;
+# pulling it during install is slow and frequently fails, which blocks READY even
+# though it is irrelevant to training. We strip it from the copied snapshot and
+# leave it to be installed on demand. The audit list already excludes it, so the
+# plugin reaches READY on the core trainable dependency set alone.
+OPTIONAL_RUNTIME_DEPENDENCY_MARKERS = ("sam3 @ git+",)
+
+# Mirror endpoint applied to install/runtime so HuggingFace fetches prefer a
+# China-friendly mirror first (matches the CLI training scripts). Override by
+# exporting HF_ENDPOINT (e.g. https://modelscope.cn) before installing.
+DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"
+
 ANIMA_OPTIMIZER_PACKAGES = {
     "bitsandbytes": "0.49.2",
     "dadaptation": "3.1",
@@ -57,7 +76,7 @@ ANIMA_OPTIMIZER_IMPORTS = [
 ]
 
 # Constraints pin versions but do not install these; uv must receive explicit targets.
-ANIMA_EXTRA_PIP_TARGETS = ("optimum-quanto>=0.2.0",)
+ANIMA_EXTRA_PIP_TARGETS = ("iopath==0.1.10", "optimum-quanto>=0.2.0")
 
 
 def anima_pip_dependency_targets() -> list[str]:
@@ -101,6 +120,11 @@ MAIN_EXPECTED = {
 }
 
 
+DEFAULT_PIP_INDEX_URL = "https://pypi.org/simple"
+DEFAULT_PYTORCH_INDEX_BASE = "https://download.pytorch.org/whl"
+ANIMA_CUDA_TAG = "cu130"
+
+
 @dataclass(frozen=True)
 class EnvironmentInstallPlan:
     project_root: Path
@@ -113,6 +137,7 @@ class EnvironmentInstallPlan:
     constraints: Path
     overrides: Path
     dry_run: bool = True
+    download_sources: DownloadSources | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -126,6 +151,7 @@ class EnvironmentInstallPlan:
             "constraints": str(self.constraints),
             "overrides": str(self.overrides),
             "dry_run": self.dry_run,
+            "download_sources": self.download_sources.as_dict() if self.download_sources else None,
         }
 
 
@@ -146,6 +172,17 @@ class AuditResult:
 
 
 LogFn = Callable[[str], None]
+ProgressFn = Callable[[dict], None]
+
+INSTALL_PROGRESS_PHASES = {
+    "source": 5,
+    "python": 20,
+    "venv": 35,
+    "dependencies": 70,
+    "audit": 90,
+    "ready": 100,
+    "broken": 90,
+}
 
 
 def _resolve_child(root: Path, child: Path) -> Path:
@@ -160,6 +197,7 @@ def build_environment_install_plan(
     source_root: Path,
     dry_run: bool = True,
     source_commit: str | None = None,
+    download_sources: DownloadSources | None = None,
 ) -> EnvironmentInstallPlan:
     root = project_root.resolve()
     extension_root = _resolve_child(root, layout.root)
@@ -184,11 +222,28 @@ def build_environment_install_plan(
         constraints=constraints,
         overrides=overrides,
         dry_run=dry_run,
+        download_sources=download_sources,
     )
 
 
 def _append(log: LogFn, line: str) -> None:
     log(line)
+
+
+def _emit_progress(progress: ProgressFn | None, phase: str, message: str, percent: int | None = None, **extra) -> None:
+    if not progress:
+        return
+    event = {
+        "type": "progress",
+        "phase": phase,
+        "percent": int(percent if percent is not None else INSTALL_PROGRESS_PHASES.get(phase, 0)),
+        "message": message,
+    }
+    event.update({key: value for key, value in extra.items() if value is not None})
+    try:
+        progress(event)
+    except Exception:
+        pass
 
 
 def _replace_flash_attn_dependency(source_root: Path, platform_marker: str, replacement: str, log: LogFn) -> list[str]:
@@ -217,11 +272,44 @@ def _replace_flash_attn_dependency(source_root: Path, platform_marker: str, repl
     return changed
 
 
-def localize_linux_flash_attn_dependency(source_root: Path, log: LogFn = print) -> list[str]:
+def localize_linux_flash_attn_dependency(
+    source_root: Path,
+    log: LogFn = print,
+    github_url_prefix: str | None = None,
+) -> list[str]:
     if not sys.platform.startswith("linux"):
         return []
-    replacement = f'"flash-attn @ {FLASH_ATTN_LINUX_CU130_URL} ; {FLASH_ATTN_LINUX_PLATFORM_MARKER}",'
+    wheel_url = apply_github_prefix(FLASH_ATTN_LINUX_CU130_URL, github_url_prefix)
+    replacement = f'"flash-attn @ {wheel_url} ; {FLASH_ATTN_LINUX_PLATFORM_MARKER}",'
     return _replace_flash_attn_dependency(source_root, FLASH_ATTN_LINUX_PLATFORM_MARKER, replacement, log)
+
+
+def strip_optional_runtime_dependencies(source_root: Path, log: LogFn = print) -> list[str]:
+    """Drop masking-only deps (sam3) from the copied snapshot's pyproject.
+
+    Keeps the Fast install scoped to the core trainable dependency set so a slow
+    or gated sam3 git build cannot block the plugin from reaching READY. Editing
+    the *copied* snapshot leaves the upstream source untouched.
+    """
+    pyproject = source_root / "pyproject.toml"
+    if not pyproject.is_file():
+        return []
+    lines = pyproject.read_text(encoding="utf-8").splitlines(keepends=True)
+    removed: list[str] = []
+    kept: list[str] = []
+    for line in lines:
+        stripped = line.lstrip()
+        if not stripped.startswith("#") and any(
+            marker in line for marker in OPTIONAL_RUNTIME_DEPENDENCY_MARKERS
+        ):
+            removed.append(line.strip().rstrip(","))
+            continue
+        kept.append(line)
+    if removed:
+        pyproject.write_text("".join(kept), encoding="utf-8")
+        for dependency in removed:
+            _append(log, f"[patch] dropped optional masking dependency (install on demand): {dependency}")
+    return removed
 
 
 def _anima_expected_for_platform(platform: str | None = None) -> dict:
@@ -242,12 +330,22 @@ def _run_streaming_once(command: list[str], cwd: Path, log: LogFn, env: dict[str
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
+    if (
+        sys.platform == "win32"
+        and "UV_SYSTEM_CERTS" not in merged_env
+        and "UV_NATIVE_TLS" not in merged_env
+    ):
+        merged_env["UV_SYSTEM_CERTS"] = "true"
     merged_env.update({
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUNBUFFERED": "1",
         "PYTHONNOUSERSITE": "1",
         "UV_HTTP_TIMEOUT": merged_env.get("UV_HTTP_TIMEOUT", "300"),
         "UV_CONCURRENT_DOWNLOADS": merged_env.get("UV_CONCURRENT_DOWNLOADS", "2"),
+        # Prefer a China-friendly HuggingFace mirror unless the user already set
+        # one (matches the CLI training scripts). Set HF_ENDPOINT=https://modelscope.cn
+        # to route through ModelScope instead.
+        "HF_ENDPOINT": merged_env.get("HF_ENDPOINT", DEFAULT_HF_ENDPOINT),
     })
     completed = subprocess.Popen(
         command,
@@ -261,11 +359,23 @@ def _run_streaming_once(command: list[str], cwd: Path, log: LogFn, env: dict[str
         bufsize=1,
     )
     assert completed.stdout is not None
+    unknown_certificate_issuer = False
     for line in iter(completed.stdout.readline, ""):
-        _append(log, line.rstrip("\r\n"))
+        clean_line = line.rstrip("\r\n")
+        if "unknownissuer" in clean_line.lower():
+            unknown_certificate_issuer = True
+        _append(log, clean_line)
     returncode = completed.wait()
     _append(log, f"[exit] returncode={returncode}")
     if returncode != 0:
+        if unknown_certificate_issuer:
+            _append(log, "[hint] HTTPS certificate verification failed (UnknownIssuer).")
+            _append(
+                log,
+                "[hint] Windows: ensure the proxy or antivirus root CA is trusted; "
+                "the installer enables UV_SYSTEM_CERTS=true by default.",
+            )
+            _append(log, "[hint] For older uv versions, set UV_NATIVE_TLS=true before retrying.")
         raise subprocess.CalledProcessError(returncode, command)
 
 
@@ -305,24 +415,63 @@ def _find_base_python(plan: EnvironmentInstallPlan) -> Path:
     return plan.base_python
 
 
-def install_environment(plan: EnvironmentInstallPlan, log: LogFn = print) -> AuditResult:
-    facts = {"plan": plan.as_dict(), "phase": "source"}
+def _install_task_id_from_state(layout: ExtensionLayout) -> str | None:
+    if not layout.install_state.is_file():
+        return None
+    try:
+        payload = json.loads(layout.install_state.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    task_id = (payload.get("facts") or {}).get("task_id")
+    return str(task_id) if task_id else None
+
+
+def install_environment(
+    plan: EnvironmentInstallPlan,
+    log: LogFn = print,
+    task_id: str | None = None,
+    progress: ProgressFn | None = None,
+) -> AuditResult:
+    task_id = task_id or _install_task_id_from_state(plan.layout)
+    facts: dict = {"plan": plan.as_dict(), "phase": "source"}
+    if task_id:
+        facts["task_id"] = task_id
+    _emit_progress(progress, "source", "Preparing Anima Fast runtime source")
     write_install_state(plan.layout, STATE_INSTALLING, facts, "copying Anima source snapshot")
     _append(log, "[phase] copy source snapshot")
     if plan.source_commit:
         _append(log, f"[source] pinned commit {plan.source_commit}")
     copy_source_snapshot(build_install_plan(plan.source_root, plan.layout, dry_run=False, source_commit=plan.source_commit))
-    localized_direct_urls = localize_linux_flash_attn_dependency(plan.layout.source, log)
+    github_prefix = plan.download_sources.github_url_prefix if plan.download_sources else None
+    localized_direct_urls = localize_linux_flash_attn_dependency(plan.layout.source, log, github_url_prefix=github_prefix)
     if localized_direct_urls:
         facts["localized_direct_url_dependencies"] = localized_direct_urls
+    dropped_optional = strip_optional_runtime_dependencies(plan.layout.source, log)
+    if dropped_optional:
+        facts["dropped_optional_dependencies"] = dropped_optional
 
     if not plan.constraints.is_file():
         raise FileNotFoundError(f"Anima constraints file missing: {plan.constraints}")
     if not plan.overrides.is_file():
         raise FileNotFoundError(f"Anima overrides file missing: {plan.overrides}")
 
+    process_env = install_process_env(plan.download_sources)
+    pip_index = (
+        plan.download_sources.pip_index_url
+        if plan.download_sources and plan.download_sources.pip_index_url
+        else DEFAULT_PIP_INDEX_URL
+    )
+    torch_index = pytorch_extra_index_url(
+        plan.download_sources.pytorch_index_url if plan.download_sources else None,
+        ANIMA_CUDA_TAG,
+        f"{DEFAULT_PYTORCH_INDEX_BASE}/{ANIMA_CUDA_TAG}",
+    )
+    if plan.download_sources:
+        _append(log, f"[sources] pip={pip_index} pytorch={torch_index} hf={plan.download_sources.hf_endpoint or '(default)'} github_prefix={github_prefix or '(none)'}")
+
     uv = _uv_command()
     facts["phase"] = "python"
+    _emit_progress(progress, "python", "Installing or locating Python 3.13 runtime")
     write_install_state(plan.layout, STATE_INSTALLING, facts, "preparing Python 3.13 runtime")
     base_python = _find_base_python(plan)
     if not base_python.is_file():
@@ -331,6 +480,7 @@ def install_environment(plan: EnvironmentInstallPlan, log: LogFn = print) -> Aud
             [uv, "python", "install", "3.13", "--install-dir", str(plan.python_install_dir), "--reinstall", "--no-cache"],
             plan.project_root,
             log,
+            env=process_env,
         )
         base_python = _find_base_python(plan)
     if not base_python.is_file():
@@ -342,14 +492,21 @@ def install_environment(plan: EnvironmentInstallPlan, log: LogFn = print) -> Aud
         _append(log, f"[skip] Python runtime exists: {base_python}")
 
     facts["phase"] = "venv"
+    _emit_progress(progress, "venv", "Creating Anima extension virtual environment")
     write_install_state(plan.layout, STATE_INSTALLING, facts, "creating Anima extension venv")
     if not plan.venv_python.is_file():
         plan.venv_python.parent.parent.mkdir(parents=True, exist_ok=True)
-        _run_streaming([str(base_python), "-m", "venv", str(plan.venv_python.parent.parent)], plan.project_root, log)
+        _run_streaming(
+            [str(base_python), "-m", "venv", str(plan.venv_python.parent.parent)],
+            plan.project_root,
+            log,
+            env=process_env,
+        )
     else:
         _append(log, f"[skip] Anima venv exists: {plan.venv_python}")
 
     facts["phase"] = "dependencies"
+    _emit_progress(progress, "dependencies", "Installing Anima Fast Python dependencies")
     write_install_state(plan.layout, STATE_INSTALLING, facts, "installing Anima dependencies")
     pip_targets = [*anima_pip_dependency_targets(), str(plan.layout.source)]
     _run_streaming(
@@ -362,9 +519,9 @@ def install_environment(plan: EnvironmentInstallPlan, log: LogFn = print) -> Aud
             "--no-cache",
             "--no-config",
             "--index-url",
-            "https://pypi.org/simple",
+            pip_index,
             "--extra-index-url",
-            "https://download.pytorch.org/whl/cu130",
+            torch_index,
             "--index-strategy",
             "unsafe-best-match",
             "--constraints",
@@ -375,10 +532,12 @@ def install_environment(plan: EnvironmentInstallPlan, log: LogFn = print) -> Aud
         ],
         plan.project_root,
         log,
+        env=process_env,
         retries=int(os.environ.get("ANIMA_FAST_INSTALL_RETRIES", "3")),
     )
 
     facts["phase"] = "audit"
+    _emit_progress(progress, "audit", "Auditing Anima Fast environment")
     write_install_state(plan.layout, STATE_AUDITING, facts, "auditing Anima environment")
     result = audit_environment(plan.project_root, plan.layout, main_python=Path(sys.executable), require_cuda=True)
     plan.layout.audit_result.write_text(json.dumps(result.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -387,9 +546,11 @@ def install_environment(plan: EnvironmentInstallPlan, log: LogFn = print) -> Aud
     final_facts["audit"] = result.as_dict()
     if result.ok:
         write_install_state(plan.layout, STATE_READY, final_facts, "audit passed")
-        _append(log, "[ready] Anima Fast environment audit passed")
+        _emit_progress(progress, "ready", "Anima Fast environment is ready", percent=100, state="ready")
+        _append(log, "[ready] Anima Fast core trainable dependencies verified (masking extras like sam3 install on demand)")
     else:
         write_install_state(plan.layout, STATE_BROKEN, final_facts, "; ".join(result.errors))
+        _emit_progress(progress, "broken", "Anima Fast environment audit failed", state="broken")
         _append(log, "[broken] Anima Fast environment audit failed")
     return result
 
@@ -599,20 +760,28 @@ def start_install_task(
     source_root: Path,
     dry_run: bool = False,
     source_commit: str | None = None,
+    download_sources: DownloadSources | None = None,
 ) -> tuple[str, dict]:
-    plan = build_environment_install_plan(project_root, layout, source_root, dry_run=dry_run, source_commit=source_commit)
+    plan = build_environment_install_plan(
+        project_root,
+        layout,
+        source_root,
+        dry_run=dry_run,
+        source_commit=source_commit,
+        download_sources=download_sources,
+    )
     if dry_run:
         return "", {"plan": plan.as_dict()}
 
     task_id = f"anima-install-{uuid.uuid4()}"
-    task = Task(
-        task_id=task_id,
-        command=["anima-fast-install"],
-        environ=os.environ.copy(),
+    task = tm.create_task(
+        ["anima-fast-install"],
+        os.environ.copy(),
         metadata={"kind": "anima_fast_install", "plan": plan.as_dict()},
         cwd=str(project_root),
+        task_id=task_id,
+        lane=LANE_MAINTENANCE,
     )
-    tm.add_task(task_id, task)
     task.start_log_only()
     write_install_state(plan.layout, STATE_INSTALLING, {"plan": plan.as_dict(), "task_id": task_id}, "install task queued")
 
@@ -622,16 +791,24 @@ def start_install_task(
         def log(line: str) -> None:
             train_log_hub.append_line(task_id, line)
 
+        def progress(event: dict) -> None:
+            train_log_hub.append_event(task_id, event)
+
         try:
             log("[start] Anima Fast plugin installation")
             from .source_root import ensure_install_source_ready
 
+            github_prefix = plan.download_sources.github_url_prefix if plan.download_sources else None
             resolved_source = ensure_install_source_ready(
-                plan.project_root, plan.source_root, plan.source_commit, log=log
+                plan.project_root,
+                plan.source_root,
+                plan.source_commit,
+                log=log,
+                github_url_prefix=github_prefix,
             )
             if resolved_source != plan.source_root:
                 plan = replace(plan, source_root=resolved_source)
-            result = install_environment(plan, log)
+            result = install_environment(plan, log, task_id=task_id, progress=progress)
             task.metadata["audit"] = result.as_dict()
             task.finish_log_only(0 if result.ok else 1, None if result.ok else "; ".join(result.errors))
         except (Exception, KeyboardInterrupt) as exc:  # install failures must become observable state
@@ -641,4 +818,9 @@ def start_install_task(
             task.finish_log_only(1, exc)
 
     threading.Thread(target=runner, daemon=True).start()
-    return task_id, {"task_id": task_id, "plan": plan.as_dict(), "log_stream": f"/api/plugins/anima-lora/install/log/stream/{task_id}"}
+    return task_id, {
+        "task_id": task_id,
+        "plan": plan.as_dict(),
+        "log_stream": f"/api/plugins/anima-lora/install/log/stream/{task_id}",
+        "progress_stream": f"/api/plugins/anima-lora/install/progress/stream/{task_id}",
+    }

@@ -7,7 +7,7 @@ import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,9 +19,23 @@ from mikazuki.app.api import router as api_router
 # from mikazuki.app.ipc import router as ipc_router
 from mikazuki.app.proxy import router as proxy_router
 from mikazuki.utils.devices import check_torch_gpu
+from mikazuki.spa import (
+    should_fallback_to_spa,
+    train_monitor_browser_host,
+    train_monitor_browser_url,
+    train_monitor_url,
+    wait_for_tcp_port,
+)
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
+
+# Dist bundles patched in-repo keep the same content hash filename; do not
+# treat them as immutable or browsers keep stale JS after git pull / release update.
+_IN_PLACE_PATCHED_DIST_ASSETS = frozenset({
+    "/assets/app.547295de.js",
+    "/assets/layout.96d49288.js",
+})
 
 
 def frontend_dist_path() -> Path:
@@ -40,7 +54,7 @@ class SPAStaticFiles(StaticFiles):
         try:
             return await super().get_response(path, scope)
         except HTTPException as ex:
-            if ex.status_code == 404:
+            if should_fallback_to_spa(path, ex.status_code):
                 return await super().get_response("index.html", scope)
             else:
                 raise ex
@@ -90,6 +104,10 @@ async def _async_update_check():
 async def app_startup():
     app_config.load_config()
 
+    from mikazuki.tasks import tm
+    tm.enable_persistence()
+    tm.restore_queue()
+
     await load_schemas()
     await load_presets()
     await asyncio.to_thread(check_torch_gpu)
@@ -97,7 +115,6 @@ async def app_startup():
     asyncio.create_task(_async_update_check())
 
     if sys.platform == "win32" and os.environ.get("MIKAZUKI_DEV", "0") != "1":
-        import time
         from mikazuki.log import log as app_log
 
         browser = _resolve_browser()
@@ -105,10 +122,22 @@ async def app_startup():
             app_log.info(f"Using browser: {os.environ.get('MIKAZUKI_BROWSER', 'default')}")
 
         browser.open(_start_url())
-        monitor_port = os.environ.get("TRAIN_MONITOR_PORT", "6008")
-        time.sleep(1)
-        app_log.info(f"Opening train monitor in browser: http://127.0.0.1:{monitor_port}")
-        browser.open(f'http://127.0.0.1:{monitor_port}')
+        # Only open the monitor tab when gui.py actually started it, and only
+        # after the port accepts connections. Otherwise Windows users get a
+        # blank ERR_CONNECTION_REFUSED tab on a dead 6008.
+        monitor_url = train_monitor_browser_url()
+        if not monitor_url:
+            return
+        host = train_monitor_browser_host()
+        port = int(os.environ.get("TRAIN_MONITOR_PORT", "6008"))
+        if wait_for_tcp_port(host, port, timeout=12.0):
+            app_log.info(f"Opening train monitor in browser: {monitor_url}")
+            browser.open(monitor_url)
+        else:
+            app_log.warning(
+                f"Train monitor not ready at {monitor_url}; skip opening browser tab. "
+                f"Use /train-monitor from the WebUI after it comes up."
+            )
 
 
 @asynccontextmanager
@@ -156,6 +185,7 @@ async def add_cache_control_header(request, call_next):
     path = request.url.path
     if (
         path.endswith(".html")
+        or path in _IN_PLACE_PATCHED_DIST_ASSETS
         or path.endswith("/assets/tagger-progress.js")
         or path.endswith("/assets/sd-trainer-brand.js")
         or path.endswith("/assets/dataset-editor.js")
@@ -163,7 +193,7 @@ async def add_cache_control_header(request, call_next):
         or path.endswith("/assets/dataset-editor-entry.js")
     ):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
-    elif re.search(r"\.[a-f0-9]{8}\.(js|css|webp)$", path):
+    elif re.search(r"-[A-Za-z0-9_-]{8}\.(js|css|webp)$", path):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     else:
         response.headers["Cache-Control"] = "max-age=0"
@@ -184,10 +214,10 @@ async def train_log_viewer():
 
 
 @app.get("/train-monitor")
-async def train_monitor_redirect():
+async def train_monitor_redirect(request: Request):
     """Open the lightweight monitor on the actual runtime port."""
     monitor_port = os.environ.get("TRAIN_MONITOR_PORT", "6008")
-    return RedirectResponse(url=f"http://127.0.0.1:{monitor_port}", status_code=302)
+    return RedirectResponse(url=train_monitor_url(str(request.url), int(monitor_port)), status_code=302)
 
 
 @app.get("/lora/sdxl.html")

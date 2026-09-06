@@ -20,11 +20,7 @@ else
   exit 1
 fi
 
-if ! command -v uv >/dev/null 2>&1; then
-  echo "[Error] uv not found in PATH." >&2
-  echo "Install: https://docs.astral.sh/uv/getting-started/installation/" >&2
-  exit 1
-fi
+# uv is bootstrapped automatically by install_anima_fast.py if missing.
 
 export PYTHONUTF8=1
 export PYTHONPATH="${PROJECT_ROOT}"
@@ -34,8 +30,11 @@ echo "  Anima Fast CLI Install"
 echo "  Project: ${PROJECT_ROOT}"
 echo "========================================"
 echo ""
-echo "This installs extensions/anima_lora/ without opening WebUI."
+echo "This installs the core trainable dependencies for extensions/anima_lora/."
+echo "Masking extras (sam3) are optional and installed on demand, not here."
 echo "Requires NVIDIA GPU, ~16GB+ VRAM, several GB download."
+echo "uv will be installed automatically if it is not found."
+echo "Downloads prefer the HuggingFace mirror; set HF_ENDPOINT to override."
 echo ""
 
 exec "${PYTHON}" -s "${SCRIPT_DIR}/install_anima_fast.py" "$@"

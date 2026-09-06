@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from mikazuki.tagger.interrogator import available_interrogators, on_interrogate
 from mikazuki.tagger.model_fetch import (
+    describe_interrogator_asset_status,
     download_interrogator_assets,
     ensure_interrogator_assets,
+    format_tagger_download_error,
     interrogator_assets_ready,
     use_download_endpoint,
 )
@@ -22,6 +24,9 @@ def run_prefetch_job(req) -> None:
     if not tagger_progress.try_begin("downloading", model_key, "正在准备下载…"):
         return
 
+    ready, status_msg = describe_interrogator_asset_status(model_key, interrogator)
+    print(status_msg, flush=True)
+
     try:
         with use_download_endpoint(getattr(req, "download_endpoint", "")):
             if interrogator_assets_ready(interrogator, model_key):
@@ -34,7 +39,9 @@ def run_prefetch_job(req) -> None:
         if tagger_progress.is_cancel_requested():
             tagger_progress.finish_cancelled()
         else:
-            tagger_progress.finish_error(str(exc))
+            hint = format_tagger_download_error(model_key, exc)
+            print(f"[tagger] prefetch failed: {hint}", flush=True)
+            tagger_progress.finish_error(hint)
 
 
 def run_interrogate_job(req) -> None:
@@ -54,6 +61,10 @@ def run_interrogate_job(req) -> None:
     if not tagger_progress.try_begin(initial_phase, model_key, initial_message):
         return
 
+    ready, status_msg = describe_interrogator_asset_status(model_key, interrogator)
+    print(f"[tagger] 打标任务: model={model_key}, path={req.path}", flush=True)
+    print(status_msg, flush=True)
+
     try:
         with use_download_endpoint(getattr(req, "download_endpoint", "")):
             if needs_download:
@@ -68,7 +79,9 @@ def run_interrogate_job(req) -> None:
             if tagger_progress.is_cancel_requested():
                 tagger_progress.finish_cancelled()
             else:
-                tagger_progress.finish_error(str(exc))
+                hint = format_tagger_download_error(model_key, exc)
+                print(f"[tagger] load failed: {hint}", flush=True)
+                tagger_progress.finish_error(hint)
             return
 
         result = on_interrogate(
@@ -107,4 +120,6 @@ def run_interrogate_job(req) -> None:
         if tagger_progress.is_cancel_requested():
             tagger_progress.finish_cancelled()
         else:
-            tagger_progress.finish_error(str(exc))
+            hint = format_tagger_download_error(model_key, exc)
+            print(f"[tagger] failed: {hint}", flush=True)
+            tagger_progress.finish_error(hint)

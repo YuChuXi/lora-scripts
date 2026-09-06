@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$PortableRoot,
     [switch]$SkipDownload
@@ -8,10 +8,32 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 . (Join-Path $PSScriptRoot "portable_updater_common.ps1")
+Initialize-PortableUpdaterConsole
 
-$PortableRoot = $PortableRoot.TrimEnd('\')
-$trainerDir = Join-Path $PortableRoot "SD-Trainer"
+$PortableRoot = Normalize-PortableRootPath $PortableRoot
+$trainerDir = Join-Path $PortableRoot "Next-Trainer"
 $updated = $false
+
+$localUpdater = (Read-LocalUpdaterVersion $trainerDir).Trim()
+$remoteUpdater = (Get-RemoteUpdaterVersionOnline).Trim()
+if ($localUpdater -and $localUpdater -ne "unknown") {
+    if (-not $remoteUpdater) {
+        Write-Host "Online updater version unavailable; keeping local v$localUpdater."
+        Write-Host "无法获取线上更新脚本版本，保留本地 v$localUpdater。"
+        Write-Host ""
+        exit 0
+    }
+    try {
+        if ([int]$localUpdater -gt [int]$remoteUpdater) {
+            Write-Host "Local updater v$localUpdater is newer than GitHub main v$remoteUpdater; skipping bootstrap download."
+            Write-Host "本地更新脚本 v$localUpdater 高于 GitHub main v$remoteUpdater，跳过在线覆盖。"
+            Write-Host ""
+            exit 0
+        }
+    } catch {
+        # Non-numeric UPDATER_VERSION values fall through to hash sync.
+    }
+}
 
 function Get-FileSha256([string]$Path) {
     if (-not (Test-Path $Path)) { return "" }
@@ -20,7 +42,7 @@ function Get-FileSha256([string]$Path) {
 
 if (-not $SkipDownload) {
     Write-Host "Checking latest updater scripts on GitHub / 检查 GitHub 最新更新脚本..."
-    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sd-trainer-updater-bootstrap-" + [guid]::NewGuid().ToString("n"))
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("next-trainer-updater-bootstrap-" + [guid]::NewGuid().ToString("n"))
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     try {
         foreach ($item in (Get-PortableUpdaterManifest)) {
@@ -40,6 +62,7 @@ if (-not $SkipDownload) {
             $newHash = Get-FileSha256 $tempFile
             if ($oldHash -ne $newHash) {
                 Copy-Item $tempFile $dest -Force
+                Ensure-PortablePs1Utf8Bom -Path $dest
                 Write-Host "  [updated] $($item.Dest)"
                 $updated = $true
             }

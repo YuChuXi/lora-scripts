@@ -42,6 +42,14 @@ class ExtensionLayout:
     def train_py(self) -> Path:
         return self.source / "train.py"
 
+    @property
+    def base_config(self) -> Path:
+        return self.source / "configs" / "base.toml"
+
+    @property
+    def resize_script(self) -> Path:
+        return self.source / "preprocess" / "resize_images.py"
+
 
 @dataclass(frozen=True)
 class ExtensionStatus:
@@ -124,13 +132,28 @@ def write_install_state(layout: ExtensionLayout, state: str, facts: dict | None 
     layout.install_state.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _missing_runtime_files(layout: ExtensionLayout) -> list[str]:
+    required = (
+        (layout.train_py, "train.py"),
+        (layout.base_config, "configs/base.toml"),
+        (layout.resize_script, "preprocess/resize_images.py"),
+    )
+    return [label for path, label in required if not path.is_file()]
+
+
 def read_extension_status(layout: ExtensionLayout) -> ExtensionStatus:
     if not layout.root.exists():
         return ExtensionStatus(STATE_NOT_INSTALLED, str(layout.source), str(layout.venv_python), "extension root missing")
     if not layout.source.exists():
         return ExtensionStatus(STATE_NOT_INSTALLED, str(layout.source), str(layout.venv_python), "source missing")
-    if not layout.train_py.is_file():
-        return ExtensionStatus(STATE_BROKEN, str(layout.source), str(layout.venv_python), "train.py missing")
+    missing = _missing_runtime_files(layout)
+    if missing and not layout.install_state.is_file():
+        return ExtensionStatus(
+            STATE_BROKEN,
+            str(layout.source),
+            str(layout.venv_python),
+            "required runtime file(s) missing: " + ", ".join(missing),
+        )
     if not layout.venv_python.is_file():
         return ExtensionStatus(STATE_INSTALLED_UNVERIFIED, str(layout.source), str(layout.venv_python), "python missing")
     if not layout.install_state.is_file():
@@ -143,6 +166,21 @@ def read_extension_status(layout: ExtensionLayout) -> ExtensionStatus:
 
     state = payload.get("state") or STATE_INSTALLED_UNVERIFIED
     facts = payload.get("facts") or {}
+    if state in {STATE_INSTALLING, STATE_AUDITING}:
+        reason = payload.get("reason", "")
+        state, facts, reason = _reconcile_stale_install_state(layout, state, facts, reason)
+        if state in {STATE_INSTALLING, STATE_AUDITING}:
+            return ExtensionStatus(state, str(layout.source), str(layout.venv_python), "", facts)
+        if state == STATE_BROKEN:
+            return ExtensionStatus(STATE_BROKEN, str(layout.source), str(layout.venv_python), reason, facts)
+    if missing:
+        return ExtensionStatus(
+            STATE_BROKEN,
+            str(layout.source),
+            str(layout.venv_python),
+            "required runtime file(s) missing: " + ", ".join(missing),
+            facts,
+        )
     if state == STATE_READY and not facts.get("audit", {}).get("ok"):
         return ExtensionStatus(
             STATE_INSTALLED_UNVERIFIED,
@@ -153,8 +191,6 @@ def read_extension_status(layout: ExtensionLayout) -> ExtensionStatus:
         )
     if state in {STATE_READY, STATE_INSTALLING, STATE_AUDITING, STATE_UPDATE_AVAILABLE}:
         reason = payload.get("reason", "")
-        if state in {STATE_INSTALLING, STATE_AUDITING}:
-            state, facts, reason = _reconcile_stale_install_state(layout, state, facts, reason)
         return ExtensionStatus(
             state,
             str(layout.source),

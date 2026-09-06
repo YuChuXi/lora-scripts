@@ -3,7 +3,7 @@ chcp 65001 >nul 2>&1
 setlocal EnableDelayedExpansion
 title Install Anima Fast (CLI)
 
-:: SD-Trainer/scripts/cli -> project root is ..\..
+:: Next-Trainer/scripts/cli -> project root is ..\..
 set "PROJECT_ROOT=%~dp0..\.."
 cd /d "%PROJECT_ROOT%"
 
@@ -22,13 +22,7 @@ if not defined PYTHON_EXE (
     exit /b 1
 )
 
-where uv >nul 2>&1
-if errorlevel 1 (
-    echo [Error] uv not found in PATH.
-    echo Install: https://docs.astral.sh/uv/getting-started/installation/
-    pause
-    exit /b 1
-)
+:: uv is bootstrapped automatically by install_anima_fast.py if missing.
 
 set "PYTHONUTF8=1"
 set "PYTHONPATH=%PROJECT_ROOT%"
@@ -38,8 +32,11 @@ echo   Anima Fast CLI Install
 echo   Project: %PROJECT_ROOT%
 echo ========================================
 echo.
-echo This installs extensions\anima_lora\ without opening WebUI.
+echo This installs the core trainable dependencies for extensions\anima_lora\.
+echo Masking extras (sam3) are optional and installed on demand, not here.
 echo Requires NVIDIA GPU, ~16GB+ VRAM, several GB download.
+echo uv will be installed automatically if it is not found.
+echo Downloads prefer the HuggingFace mirror; set HF_ENDPOINT to override.
 echo.
 
 "%PYTHON_EXE%" -s "%~dp0install_anima_fast.py" %*

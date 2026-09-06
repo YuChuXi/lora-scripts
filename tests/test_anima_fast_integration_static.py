@@ -20,6 +20,15 @@ class AnimaFastStaticIntegrationTests(unittest.TestCase):
         self.assertIn('"EmoSens"', shared[: shared.index("ANIMA_FAST_LR_OPTIMIZER")])
         self.assertIn('Schema.const("lora")', schema)
 
+    def test_fast_schema_exposes_bucket_resolution_controls(self):
+        schema = Path("mikazuki/schema/anima-lora-fast.ts").read_text(encoding="utf-8")
+
+        self.assertIn("min_bucket_reso:", schema)
+        self.assertIn("max_bucket_reso:", schema)
+        self.assertIn("bucket_reso_steps:", schema)
+        self.assertIn("bucket_no_upscale:", schema)
+        self.assertIn("留空时按训练分辨率自动设置", schema)
+
     def test_fast_adapter_does_not_whitelist_emosens(self):
         adapter = Path("mikazuki/anima_fast_backend/adapter.py").read_text(encoding="utf-8")
         self.assertIn("FAST_SUPPORTED_OPTIMIZERS", adapter)
@@ -51,24 +60,13 @@ class AnimaFastStaticIntegrationTests(unittest.TestCase):
         self.assertLess(source.index("model_train_type == ANIMA_FAST_TRAIN_TYPE"), source.index("trainer_file = trainer_mapping[model_train_type]"))
 
     def test_frontend_dist_registers_anima_fast_entry(self):
-        app = Path("frontend/dist/assets/app.547295de.js").read_text(encoding="utf-8")
-        page = Path("frontend/dist/lora/anima-fast.html")
-        data = Path("frontend/dist/assets/anima-fast.html.data.js")
-        component = Path("frontend/dist/assets/anima-fast.html.page.js")
-
-        self.assertTrue(page.is_file())
-        self.assertTrue(data.is_file())
-        self.assertTrue(component.is_file())
-        self.assertIn("/lora/anima-fast.html", app)
-        self.assertIn('"text":"Fast 模式","link":"/lora/anima-fast.md"', app)
-        self.assertIn("anima-lora-fast", data.read_text(encoding="utf-8"))
-        self.assertIn("data-anima-fast-install", component.read_text(encoding="utf-8"))
-        self.assertIn("anima-fast-dataset-guide", page.read_text(encoding="utf-8"))
-        self.assertIn("data-anima-fast-guide-toggle", page.read_text(encoding="utf-8"))
-        self.assertIn("sorryhyun/anima_lora", page.read_text(encoding="utf-8"))
-        self.assertIn("anima-fast-credit", page.read_text(encoding="utf-8"))
-        self.assertIn("anima-fast-doc-links", page.read_text(encoding="utf-8"))
-        self.assertIn("docs/anima-fast.md", page.read_text(encoding="utf-8"))
+        router = Path("frontend/src/router.ts").read_text(encoding="utf-8")
+        page = Path("frontend/src/pages/AnimaFastPage.vue").read_text(encoding="utf-8")
+        training = Path("frontend/src/pages/TrainingPage.vue").read_text(encoding="utf-8")
+        self.assertIn('"/lora/anima-fast.html"', router)
+        self.assertIn('schema-name="anima-lora-fast"', page)
+        self.assertIn("animaFastPreflight", training)
+        self.assertIn("TrainingPage", page)
 
     def test_benchmark_example_configs_exist(self):
         examples = Path("docs/examples")

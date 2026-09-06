@@ -6,7 +6,8 @@ import subprocess
 import sys
 
 from mikazuki.launch_utils import (base_dir_path, catch_exception, git_tag,
-                                   prepare_environment, check_port_avaliable)
+                                   prepare_environment, check_port_avaliable,
+                                   ensure_requirements_installed)
 from mikazuki.log import log
 from mikazuki.portable_utils import sanitize_embedded_deps, train_env_overrides
 
@@ -21,7 +22,7 @@ parser.add_argument("--disable-tageditor", action="store_true")
 parser.add_argument(
     "--enable-legacy-tageditor",
     action="store_true",
-    help="Start the legacy Gradio Dataset Tag Editor compatibility service.",
+    help="Deprecated compatibility flag. Legacy Gradio Dataset Tag Editor now starts by default.",
 )
 parser.add_argument("--disable-train-monitor", action="store_true")
 parser.add_argument("--disable-auto-mirror", action="store_true")
@@ -119,15 +120,26 @@ def run_tag_editor(port: int):
 
 def launch():
     sanitize_embedded_deps(log.warning)
+    from mikazuki.china_hub import enable_china_hub
+
+    if enable_china_hub():
+        log.info("Using ModelScope hub patch for Hugging Face downloads (国内下载走魔搭)")
     for key, value in train_env_overrides().items():
         os.environ.setdefault(key, value)
     log.info("Starting SD-Trainer Mikazuki GUI...")
     log.info(f"Base directory: {base_dir_path()}, Working directory: {os.getcwd()}")
     log.info(f"{platform.system()} Python {platform.python_version()} {sys.executable}")
-    legacy_tageditor_enabled = args.enable_legacy_tageditor and not args.disable_tageditor
+    legacy_tageditor_enabled = not args.disable_tageditor
 
     if not args.skip_prepare_environment:
-        prepare_environment(disable_auto_mirror=args.disable_auto_mirror)
+        prepare_environment(disable_auto_mirror=args.disable_auto_mirror,
+                            prepare_onnxruntime=not args.skip_prepare_onnxruntime)
+    else:
+        # Portable launch skips prepare_environment, so requirements.txt is
+        # otherwise never validated. Run a cheap presence-only guard so newly
+        # added or missing packages (e.g. onnxruntime-gpu) get repaired instead
+        # of silently breaking tagging/training.
+        ensure_requirements_installed("requirements.txt")
 
     # Protect each service's default port before scanning fallbacks. Otherwise
     # TensorBoard can claim 6008 as a fallback and make monitor links open it.
@@ -170,19 +182,21 @@ def launch():
     from mikazuki.update_check import local_version
     log.info(f"SD-Trainer Version: {local_version()}")
 
+    if args.listen:
+        args.host = "0.0.0.0"
+        args.tensorboard_host = "0.0.0.0"
+
     os.environ["MIKAZUKI_HOST"] = args.host
     os.environ["MIKAZUKI_PORT"] = str(args.port)
     os.environ["MIKAZUKI_TENSORBOARD_HOST"] = args.tensorboard_host
     os.environ["MIKAZUKI_TENSORBOARD_PORT"] = str(args.tensorboard_port)
+    os.environ["TRAIN_MONITOR_HOST"] = args.host
     os.environ["TRAIN_MONITOR_PORT"] = str(args.train_monitor_port)
+    os.environ["TRAIN_MONITOR_ENABLED"] = "0" if args.disable_train_monitor else "1"
     os.environ["MIKAZUKI_TAGEDITOR_PORT"] = str(tageditor_port)
     os.environ["MIKAZUKI_DEV"] = "1" if args.dev else "0"
     if args.browser:
         os.environ["MIKAZUKI_BROWSER"] = args.browser
-
-    if args.listen:
-        args.host = "0.0.0.0"
-        args.tensorboard_host = "0.0.0.0"
 
     if legacy_tageditor_enabled:
         run_tag_editor(tageditor_port)
@@ -197,7 +211,10 @@ def launch():
 
     import uvicorn
     log.info(f"Server started at http://{args.host}:{args.port}")
-    log.info(f"Train monitor at http://{args.host}:{args.train_monitor_port}")
+    if not args.disable_train_monitor:
+        log.info(f"Train monitor at http://{args.host}:{args.train_monitor_port}")
+    else:
+        log.info("Train monitor disabled (--disable-train-monitor)")
     uvicorn.run("mikazuki.app:app", host=args.host, port=args.port, log_level="error", reload=args.dev)
 
 

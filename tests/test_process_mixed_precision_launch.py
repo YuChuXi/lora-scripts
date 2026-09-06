@@ -3,12 +3,46 @@
 from __future__ import annotations
 
 import importlib
+import enum
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest import mock
+
+
+# sys.modules keys this module replaces with stand-ins (plus mikazuki.process,
+# imported below). They are snapshotted before stubbing and restored in
+# tearDownModule so stubs do not leak into later tests collected in the same
+# process (see issue #95).
+_STUBBED_MODULE_NAMES = (
+    "mikazuki.app",
+    "mikazuki.app.models",
+    "mikazuki.log",
+    "mikazuki.tasks",
+    "mikazuki.launch_utils",
+    "mikazuki.portable_utils",
+    "toml",
+    "mikazuki.anima_fast_backend.launcher",
+    "mikazuki.anima_fast_backend.service_resolver",
+    "mikazuki.process",
+)
+_SAVED_MODULES: dict[str, types.ModuleType | None] = {}
+
+
+def _snapshot_modules() -> None:
+    for name in _STUBBED_MODULE_NAMES:
+        _SAVED_MODULES[name] = sys.modules.get(name)
+
+
+def _restore_modules() -> None:
+    for name, original in _SAVED_MODULES.items():
+        if original is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
+    _SAVED_MODULES.clear()
 
 
 def _install_stub_modules() -> None:
@@ -32,10 +66,15 @@ def _install_stub_modules() -> None:
 
     tasks_mod = types.ModuleType("mikazuki.tasks")
     tasks_mod.tm = mock.MagicMock()
+
+    class _TaskStatus(enum.Enum):  # process.py only reads TaskStatus.QUEUED
+        QUEUED = 5
+
+    tasks_mod.TaskStatus = _TaskStatus
     sys.modules["mikazuki.tasks"] = tasks_mod
 
     launch_mod = types.ModuleType("mikazuki.launch_utils")
-    launch_mod.base_dir_path = lambda: "."
+    launch_mod.base_dir_path = lambda: Path("/project/root")
     sys.modules["mikazuki.launch_utils"] = launch_mod
 
     portable_mod = types.ModuleType("mikazuki.portable_utils")
@@ -66,9 +105,19 @@ def _install_stub_modules() -> None:
     resolver_mod.default_resolver = mock.MagicMock()
     sys.modules["mikazuki.anima_fast_backend.service_resolver"] = resolver_mod
 
+    sys.modules.pop("mikazuki.process", None)
 
+
+# Install stubs only long enough to import ``mikazuki.process``; the imported
+# module keeps its own references to whatever it pulled in, so we restore
+# sys.modules immediately to avoid leaking stubs into later test modules that
+# are imported in the same collection pass (issue #95).
+_snapshot_modules()
 _install_stub_modules()
-process = importlib.import_module("mikazuki.process")
+try:
+    process = importlib.import_module("mikazuki.process")
+finally:
+    _restore_modules()
 
 
 class NormalizeMixedPrecisionTests(unittest.TestCase):
@@ -139,6 +188,68 @@ class BuildAccelerateTrainCommandTests(unittest.TestCase):
         self.assertEqual(env["NO_COLOR"], "1")
         self.assertEqual(env["FORCE_COLOR"], "0")
         self.assertEqual(env["TERM"], "dumb")
+
+    def test_disables_user_site_when_training_deps_do_not_need_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            toml_path = Path(tmp) / "train.toml"
+            toml_path.write_text('mixed_precision = "bf16"\n', encoding="utf-8")
+            with mock.patch.object(process, "_module_origin_under_user_site", return_value=False):
+                _args, env, _mp = process.build_accelerate_train_command(
+                    trainer_file="./scripts/stable/train_network.py",
+                    toml_path=str(toml_path),
+                )
+
+        self.assertEqual(env["PYTHONNOUSERSITE"], "1")
+
+    def test_allows_user_site_when_torch_is_installed_there(self):
+        def _under_user_site(name: str) -> bool:
+            return name == "torch"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            toml_path = Path(tmp) / "train.toml"
+            toml_path.write_text('mixed_precision = "bf16"\n', encoding="utf-8")
+            with mock.patch.object(process, "_module_origin_under_user_site", side_effect=_under_user_site):
+                _args, env, _mp = process.build_accelerate_train_command(
+                    trainer_file="./scripts/stable/train_network.py",
+                    toml_path=str(toml_path),
+                )
+
+        self.assertNotIn("PYTHONNOUSERSITE", env)
+
+    def test_injects_project_root_onto_pythonpath(self):
+        """Regression for #158: accelerate_launch.py imports mikazuki, so the
+        project root must be on PYTHONPATH for portable installs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            toml_path = Path(tmp) / "train.toml"
+            toml_path.write_text('mixed_precision = "bf16"\n', encoding="utf-8")
+            with mock.patch.dict("os.environ", {}, clear=False):
+                import os
+
+                os.environ.pop("PYTHONPATH", None)
+                _args, env, _mp = process.build_accelerate_train_command(
+                    trainer_file="./scripts/stable/train_network.py",
+                    toml_path=str(toml_path),
+                )
+
+        self.assertEqual(env["PYTHONPATH"], str(Path("/project/root")))
+
+    def test_prepends_project_root_preserving_existing_pythonpath(self):
+        import os
+
+        existing = os.pathsep.join(["/already/here", "/second"])
+        with tempfile.TemporaryDirectory() as tmp:
+            toml_path = Path(tmp) / "train.toml"
+            toml_path.write_text('mixed_precision = "bf16"\n', encoding="utf-8")
+            with mock.patch.dict("os.environ", {"PYTHONPATH": existing}, clear=False):
+                _args, env, _mp = process.build_accelerate_train_command(
+                    trainer_file="./scripts/stable/train_network.py",
+                    toml_path=str(toml_path),
+                )
+
+        parts = env["PYTHONPATH"].split(os.pathsep)
+        self.assertEqual(parts[0], str(Path("/project/root")))
+        self.assertIn("/already/here", parts)
+        self.assertIn("/second", parts)
 
 
 if __name__ == "__main__":

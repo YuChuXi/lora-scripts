@@ -1,6 +1,6 @@
 # Contributors
 
-感谢所有为 lora-scripts-next 做出贡献的伙伴们！
+感谢所有为 Next Trainer 做出贡献的伙伴们！
 
 ## Core Team
 
@@ -11,17 +11,73 @@
     <td align="center"><a href="https://github.com/SupermarKleet"><img src="https://github.com/SupermarKleet.png" width="80" /><br /><sub><b>SupermarKleet</b></sub></a><br /><sub>UI 设计</sub></td>
     <td align="center"><a href="https://github.com/niangao2331"><img src="https://github.com/niangao2331.png" width="80" /><br /><sub><b>niangao2331</b></sub></a><br /><sub>社区贡献</sub></td>
     <td align="center"><a href="https://github.com/MikumikuDAIFans"><img src="https://github.com/MikumikuDAIFans.png" width="80" /><br /><sub><b>MikumikuDAIFans</b></sub></a><br /><sub>核心开发</sub></td>
+    <td align="center"><a href="https://github.com/IryNeko"><img src="https://github.com/IryNeko.png" width="80" /><br /><sub><b>IryNeko</b></sub></a><br /><sub>前端负责人</sub></td>
   </tr>
 </table>
 
 ## Contributions
 
-| 贡献者 | 贡献内容 | PR |
-|--------|----------|-----|
-| [@ageless-h](https://github.com/ageless-h) | Anima 训练后端迁移至 kohya-ss/sd-scripts、submodule 自动初始化、LoHa/LoKr schema 扩展、训练日志 URL 输出 | [#2](https://github.com/wochenlong/lora-scripts-next/pull/2) |
-| [@SupermarKleet](https://github.com/SupermarKleet) | 项目 UI 设计 | [#1](https://github.com/wochenlong/lora-scripts-next/pull/1) |
-| [@SupermarKleet](https://github.com/SupermarKleet) | Next Trainer 看板娘与品牌素材（Logo、README 首图、Favicon、社交预览图） | — |
-| [@niangao2331](https://github.com/niangao2331) | 修复 `Download-Anima-Model.bat` 在整合包内重复创建嵌套 `SD-Trainer` 目录的问题，模型正确下载至 `sd-models/anima/` | [#23](https://github.com/wochenlong/lora-scripts-next/pull/23) |
-| [@MikumikuDAIFans](https://github.com/MikumikuDAIFans) | **Anima Fast 模式**：`anima_lora` 插件安装器、Fast 训练路由与监控同步、预览图/进度 JSONL、性能对标与用户文档 | [#64](https://github.com/wochenlong/lora-scripts-next/pull/64) |
+<table width="100%">
+  <thead>
+    <tr>
+      <th align="left" width="12%">领域</th>
+      <th align="left" width="16%">贡献者</th>
+      <th align="left">贡献内容</th>
+      <th align="left" width="10%">关联</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>前端</td>
+      <td><a href="https://github.com/IryNeko">@IryNeko</a></td>
+      <td>
+        Vue3 前端重写与持续迭代 · 公开 <code>frontend</code> 源码 · 训练 / 数据集 / 任务 / 设置工作台<br />
+        数据集标签筛选与编辑体验 · 任务排队 / 持久化 / 重试 · 任务页训练监控入口 · 打标↔编辑 KeepAlive 状态保留<br />
+        支撑 <code>dev</code> 内测线并随 <code>main</code> 3.0.0 转正落地
+      </td>
+      <td><a href="https://github.com/wochenlong/lora-scripts-next/pull/209">#209</a></td>
+    </tr>
+    <tr>
+      <td>后端</td>
+      <td><a href="https://github.com/ageless-h">@ageless-h</a></td>
+      <td>Anima 训练后端迁移至 kohya-ss/sd-scripts · submodule 自动初始化 · LoHa / LoKr schema 扩展 · 训练日志 URL 输出</td>
+      <td><a href="https://github.com/wochenlong/lora-scripts-next/pull/2">#2</a></td>
+    </tr>
+    <tr>
+      <td>训练引擎</td>
+      <td><a href="https://github.com/MikumikuDAIFans">@MikumikuDAIFans</a></td>
+      <td>Anima Fast 模式 · anima_lora 插件安装器 · Fast 训练路由与监控同步 · 预览图与进度 JSONL · 性能对标与用户文档</td>
+      <td><a href="https://github.com/wochenlong/lora-scripts-next/pull/64">#64</a></td>
+    </tr>
+    <tr>
+      <td>UI 设计</td>
+      <td><a href="https://github.com/SupermarKleet">@SupermarKleet</a></td>
+      <td>项目 UI 设计 · Next Trainer 看板娘与品牌素材 · Logo · README 首图 · Favicon · 社交预览图</td>
+      <td><a href="https://github.com/wochenlong/lora-scripts-next/pull/1">#1</a></td>
+    </tr>
+    <tr>
+      <td>社区</td>
+      <td><a href="https://github.com/niangao2331">@niangao2331</a></td>
+      <td>修复整合包内 Download-Anima-Model.bat 重复创建嵌套目录问题</td>
+      <td><a href="https://github.com/wochenlong/lora-scripts-next/pull/23">#23</a></td>
+    </tr>
+    <tr>
+      <td>产品</td>
+      <td><a href="https://github.com/wochenlong">@wochenlong</a></td>
+      <td>团队协调与产品设计</td>
+      <td>—</td>
+    </tr>
+  </tbody>
+</table>
 
-上游项目与完整归属信息见 [`NOTICE.md`](NOTICE.md)。Fast 训练引擎原作者见 [`docs/anima-fast.md`](docs/anima-fast.md) §致谢（[sorryhyun/anima_lora](https://github.com/sorryhyun/anima_lora)）。
+## 3.0.0 内测鸣谢
+
+正式版 3.0.0 发布前，感谢参与 dev / beta 内测并反馈问题的用户与贡献者。
+
+名单待补充
+
+---
+
+上游项目与完整归属见 [`NOTICE.md`](NOTICE.md)
+
+Fast 训练引擎原作者见 [`docs/anima-fast.md`](docs/anima-fast.md) · [sorryhyun/anima_lora](https://github.com/sorryhyun/anima_lora)

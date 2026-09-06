@@ -36,12 +36,13 @@ class AnimaFastPreviewTests(unittest.TestCase):
     def test_preview_disabled_strips_sample_fields(self):
         config = {
             "enable_preview": False,
-            "sample_prompts": "./prompts.txt",
             "sample_at_first": True,
+            "sample_sampler": "euler",
         }
         warnings = apply_anima_fast_preview(config, "/tmp/autosave", "run-1")
         self.assertEqual(warnings, [])
         self.assertNotIn("sample_prompts", config)
+        self.assertNotIn("sample_sampler", config)
 
     def test_preview_enabled_writes_prompt_file_and_adapts(self):
         with tempfile.TemporaryDirectory() as td:
@@ -75,7 +76,7 @@ class AnimaFastPreviewTests(unittest.TestCase):
             adapted = adapt_config(config, runtime, run_id)
             self.assertIn("sample_prompts", adapted.values)
             self.assertEqual(adapted.values["sample_every_n_epochs"], 1)
-            self.assertFalse(adapted.values["sample_at_first"])
+            self.assertTrue(adapted.values["sample_at_first"])
             self.assertNotIn("enable_preview", adapted.values)
             self.assertNotIn("positive_prompts", adapted.values)
 
@@ -107,19 +108,38 @@ class AnimaFastPreviewTests(unittest.TestCase):
 
     def test_prompt_defaults_do_not_enable_preview_without_enable_preview_flag(self):
         config = {
-            "sample_every_n_epochs": 2,
-            "positive_prompts": "1girl, solo",
+            "sample_sampler": "euler",
+            "sample_at_first": True,
         }
         self.assertFalse(is_preview_enabled(config))
+
+    def test_strict_preview_signals_enable_preview_without_enable_preview_flag(self):
+        for key, value in (
+            ("sample_prompts", "./prompts.txt"),
+            ("positive_prompts", "1girl, solo"),
+            ("negative_prompts", "lowres"),
+            ("sample_every_n_epochs", 1),
+            ("sample_every_n_steps", 10),
+        ):
+            with self.subTest(key=key):
+                self.assertTrue(is_preview_enabled({key: value}))
 
     def test_explicit_prompt_file_enables_preview_without_enable_preview_flag(self):
         self.assertTrue(is_preview_enabled({"sample_prompts": "./prompts.txt"}))
 
-    def test_preview_disabled_when_enable_preview_false_even_with_prompt_fields(self):
+    def test_preview_false_recovers_when_strict_signal_fields_are_present(self):
         config = {
             "enable_preview": False,
             "positive_prompts": "1girl, solo",
             "sample_every_n_epochs": 2,
+        }
+        self.assertTrue(is_preview_enabled(config))
+
+    def test_preview_false_preserved_without_strict_signal_fields(self):
+        config = {
+            "enable_preview": False,
+            "sample_sampler": "euler",
+            "sample_at_first": True,
         }
         self.assertFalse(is_preview_enabled(config))
 
@@ -143,7 +163,7 @@ class AnimaFastPreviewTests(unittest.TestCase):
             self.assertNotIn("sample_sampler", dumped)
             self.assertNotIn("sample_prompts", dumped)
 
-    def test_frontend_payload_without_enable_preview_does_not_generate_sample_prompts(self):
+    def test_frontend_payload_without_enable_preview_generates_sample_prompts_from_signals(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             runtime = make_runtime(root)
@@ -164,12 +184,80 @@ class AnimaFastPreviewTests(unittest.TestCase):
             apply_anima_fast_preview(config, str(root / "autosave"), "run-fe")
             adapted = adapt_config(config, runtime, "run-fe")
             dumped = dump_flat_toml(adapted.values)
-            self.assertNotIn("sample_prompts", dumped)
-            self.assertNotIn("sample_at_first", dumped)
+            self.assertIn("sample_prompts", dumped)
+            self.assertIn("sample_at_first = true", dumped)
 
     def test_is_preview_enabled_accepts_string_true(self):
         self.assertTrue(is_preview_enabled({"enable_preview": "true"}))
         self.assertFalse(is_preview_enabled({"enable_preview": False}))
+
+    def test_sample_every_n_epochs_clamped_to_max_train_epochs(self):
+        config = {
+            "enable_preview": True,
+            "max_train_epochs": 1,
+            "sample_every_n_epochs": 2,
+            "positive_prompts": "1girl",
+        }
+        warnings = apply_anima_fast_preview(config, "/tmp/autosave", "run-clamp")
+        self.assertEqual(config["sample_every_n_epochs"], 1)
+        self.assertTrue(config.get("sample_at_first"))
+        self.assertTrue(any("sample_every_n_epochs" in item for item in warnings))
+
+    def test_sample_every_n_epochs_unchanged_when_within_max_epochs(self):
+        config = {
+            "enable_preview": True,
+            "max_train_epochs": 3,
+            "sample_every_n_epochs": 2,
+            "positive_prompts": "1girl",
+        }
+        warnings = apply_anima_fast_preview(config, "/tmp/autosave", "run-ok")
+        self.assertEqual(config["sample_every_n_epochs"], 2)
+        self.assertFalse(any("已从 2 调整为" in item for item in warnings))
+
+    def test_sample_schedule_skipped_when_sampling_by_steps(self):
+        config = {
+            "enable_preview": True,
+            "max_train_epochs": 1,
+            "sample_every_n_epochs": 2,
+            "sample_every_n_steps": 100,
+            "positive_prompts": "1girl",
+        }
+        apply_anima_fast_preview(config, "/tmp/autosave", "run-steps")
+        self.assertEqual(config["sample_every_n_epochs"], 2)
+
+    def test_default_sample_every_n_epochs_respects_single_epoch_run(self):
+        config = {
+            "enable_preview": True,
+            "max_train_epochs": 1,
+            "positive_prompts": "1girl",
+        }
+        apply_anima_fast_preview(config, "/tmp/autosave", "run-default")
+        self.assertEqual(config["sample_every_n_epochs"], 1)
+
+    def test_sample_at_first_defaults_true_so_preview_always_fires(self):
+        """Regression for #126: preview enabled must produce at least one image.
+
+        7cb49dc flipped the implicit sample_at_first default to False, so short
+        or epoch-clamped runs could finish without ever sampling. Default back
+        to True when the user did not set it explicitly.
+        """
+        config = {
+            "enable_preview": True,
+            "max_train_epochs": 1,
+            "positive_prompts": "1girl",
+        }
+        apply_anima_fast_preview(config, "/tmp/autosave", "run-at-first")
+        self.assertTrue(config["sample_at_first"])
+
+    def test_explicit_sample_at_first_false_is_preserved(self):
+        config = {
+            "enable_preview": True,
+            "max_train_epochs": 4,
+            "positive_prompts": "1girl",
+            "sample_at_first": False,
+        }
+        apply_anima_fast_preview(config, "/tmp/autosave", "run-explicit-false")
+        self.assertFalse(config["sample_at_first"])
 
 
 if __name__ == "__main__":

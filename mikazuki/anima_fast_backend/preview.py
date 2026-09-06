@@ -5,8 +5,11 @@ from pathlib import Path
 import os
 import random
 
-from .adapter import AdapterError, is_empty
-from mikazuki.utils.train_utils import build_sample_prompt_line as build_kohya_sample_prompt_line
+from .adapter import AdapterError, int_value, is_empty
+from mikazuki.utils.train_utils import (
+    build_sample_prompt_line as build_kohya_sample_prompt_line,
+    is_preview_enabled as shared_is_preview_enabled,
+)
 
 DEFAULT_SAMPLE_POSITIVE = (
     "1girl, solo, smile, japanese clothes, kimono, blue eyes, closed mouth, upper body, looki"
@@ -22,14 +25,7 @@ DEFAULT_SAMPLE_NEGATIVE = (
 
 
 def is_preview_enabled(config: dict) -> bool:
-    raw = config.get("enable_preview")
-    if raw in (True, "true", "True", "1", 1):
-        return True
-    if raw in (False, "false", "False", "0", 0):
-        return False
-    if not is_empty(config.get("prompt_file")) or not is_empty(config.get("sample_prompts")):
-        return True
-    return False
+    return shared_is_preview_enabled(config) or not is_empty(config.get("prompt_file"))
 
 
 def _strip_preview_fields(config: dict) -> None:
@@ -89,6 +85,35 @@ def build_sample_prompt_line(config: dict) -> str:
     )
 
 
+def _normalize_sample_schedule(config: dict, warnings: list[str]) -> None:
+    """Clamp epoch-based sampling so preview can fire before training ends."""
+    if not is_empty(config.get("sample_every_n_steps")):
+        return
+
+    max_epochs = int_value(config.get("max_train_epochs"), 0)
+    if max_epochs <= 0:
+        if is_empty(config.get("sample_every_n_epochs")):
+            config["sample_every_n_epochs"] = 2
+        return
+
+    if is_empty(config.get("sample_every_n_epochs")):
+        config["sample_every_n_epochs"] = min(2, max_epochs)
+        return
+
+    every_epochs = int_value(config.get("sample_every_n_epochs"), 0)
+    if every_epochs <= 0:
+        config["sample_every_n_epochs"] = min(2, max_epochs)
+        return
+
+    if every_epochs > max_epochs:
+        original = every_epochs
+        config["sample_every_n_epochs"] = max_epochs
+        warnings.append(
+            f"sample_every_n_epochs 已从 {original} 调整为 {max_epochs} "
+            f"（不超过 max_train_epochs={max_epochs}，否则训练结束前不会生成预览图）"
+        )
+
+
 def apply_anima_fast_preview(config: dict, autosave_dir: str, run_id: str) -> list[str]:
     warnings: list[str] = []
     if not is_preview_enabled(config):
@@ -114,9 +139,12 @@ def apply_anima_fast_preview(config: dict, autosave_dir: str, run_id: str) -> li
         config["sample_prompts"] = str(out_path.resolve())
 
     if config.get("sample_at_first") is None:
-        config["sample_at_first"] = False
-    if is_empty(config.get("sample_every_n_epochs")) and is_empty(config.get("sample_every_n_steps")):
-        config["sample_every_n_epochs"] = 2
+        # Default to sampling once at training start so an enabled preview
+        # always produces at least one image, even for short/epoch-clamped runs
+        # (regression from 7cb49dc, reported in #126). Users can still set it
+        # to False explicitly to skip the step-0 sample and lower VRAM peak.
+        config["sample_at_first"] = True
+    _normalize_sample_schedule(config, warnings)
     config.setdefault("sample_sampler", "euler")
 
     warnings.append(

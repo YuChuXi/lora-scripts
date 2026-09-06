@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 import re
 from typing import Any
@@ -82,6 +83,13 @@ FAST_SUPPORTED_OPTIMIZERS = {
     "pytorch_optimizer.CAME",
 }
 
+FAST_CACHE_PAIRS = (
+    ("cache_latents", "cache_latents_to_disk"),
+    ("cache_text_encoder_outputs", "cache_text_encoder_outputs_to_disk"),
+)
+
+FAST_DATASET_REPEAT_FIELDS = {"dataset_repeats", "num_repeats", "repeats", "repeat"}
+
 
 @dataclass
 class AdaptedConfig:
@@ -126,6 +134,57 @@ def resolution_tokens(value: Any) -> int:
     if width <= 0 or height <= 0:
         return 0
     return (width // 16) * (height // 16)
+
+
+def resolution_pair(value: Any, default: int = 1024) -> list[int]:
+    if value is None:
+        return [default, default]
+    if isinstance(value, int):
+        return [value, value]
+    text = str(value).replace("x", ",").replace(" ", "")
+    parts = [p for p in text.split(",") if p]
+    if len(parts) == 1:
+        size = int_value(parts[0], default)
+        return [size, size]
+    if len(parts) >= 2:
+        return [int_value(parts[0], default), int_value(parts[1], default)]
+    return [default, default]
+
+
+def normalize_bucket_resolution(values: dict[str, Any], warnings: list[str]) -> None:
+    if not truthy(values.get("enable_bucket", True)):
+        return
+
+    width, height = resolution_pair(values.get("resolution"))
+    required_max = max(width, height)
+    bucket_step = int_value(values.get("bucket_reso_steps"), 64)
+    if bucket_step <= 0:
+        raise AdapterError("bucket_reso_steps must be greater than 0")
+
+    configured_max = int_value(values.get("max_bucket_reso"), 0)
+    if configured_max <= 0:
+        effective_max = max(1024, required_max)
+        effective_max = ((effective_max + bucket_step - 1) // bucket_step) * bucket_step
+        values["max_bucket_reso"] = effective_max
+        if effective_max > 1024:
+            warnings.append(
+                f"max_bucket_reso 未设置，已按 resolution 自动设为 {effective_max}"
+            )
+        return
+
+    effective_max = ((configured_max + bucket_step - 1) // bucket_step) * bucket_step
+    if effective_max < required_max:
+        resolution_text = str(values.get("resolution", f"{width},{height}"))
+        raise AdapterError(
+            f"max_bucket_reso={configured_max} 小于 resolution={resolution_text}；"
+            f"请设置为至少 {required_max}，或留空自动计算"
+        )
+    if effective_max != configured_max:
+        values["max_bucket_reso"] = effective_max
+        warnings.append(
+            f"max_bucket_reso 已按 bucket_reso_steps 从 {configured_max} "
+            f"向上调整为 {effective_max}"
+        )
 
 
 def normalize_kv_args(values: Any) -> list[str]:
@@ -301,6 +360,18 @@ def adapt_config(source: dict[str, Any], runtime: RuntimeConfig, run_id: str) ->
             continue
         values[key] = value
 
+    train_batch_size = int_value(values.get("train_batch_size"), 0)
+    if train_batch_size > 0:
+        values["batch_size"] = train_batch_size
+
+    for repeat_key in FAST_DATASET_REPEAT_FIELDS:
+        repeats = int_value(source.get(repeat_key), 0)
+        if repeats > 0:
+            values["dataset_repeats"] = repeats
+            break
+
+    normalize_bucket_resolution(values, warnings)
+
     values.setdefault("torch_compile", True)
     values.setdefault("static_token_count", 4096)
     if truthy(values.get("torch_compile")):
@@ -312,9 +383,17 @@ def adapt_config(source: dict[str, Any], runtime: RuntimeConfig, run_id: str) ->
                 f"static_token_count 已按 resolution 自动提高到 {tokens}；"
                 "高分辨率 Fast compile 会显著增加显存占用"
             )
-    cache_keys = ("cache_latents", "cache_text_encoder_outputs")
+    for cache_key, disk_key in FAST_CACHE_PAIRS:
+        values.setdefault(cache_key, False)
+        if not truthy(values.get(cache_key)):
+            values[disk_key] = False
+        else:
+            values.setdefault(disk_key, True)
+    values.setdefault("skip_cache_check", False)
+
+    cache_keys = tuple(cache_key for cache_key, _disk_key in FAST_CACHE_PAIRS)
     if truthy(values.get("skip_cache_check")) and any(truthy(values.get(key)) for key in cache_keys):
-        for key in (*cache_keys, "skip_cache_check"):
+        for key in (*cache_keys, *(disk_key for _cache_key, disk_key in FAST_CACHE_PAIRS), "skip_cache_check"):
             values[key] = False
         warnings.append(
             "cache_latents/cache_text_encoder_outputs 不能与 skip_cache_check 同时开启；"
@@ -325,6 +404,8 @@ def adapt_config(source: dict[str, Any], runtime: RuntimeConfig, run_id: str) ->
         values["compile_mode"] = "blocks"
         warnings.append("compile_mode=full 与 gradient_checkpointing 不兼容，已自动改为 blocks")
     values.setdefault("dynamo_backend", "inductor")
+    values.setdefault("log_prefix", "af_")
+    values.setdefault("log_tracker_name", "tb")
     if is_empty(values.get("attn_mode")):
         values["attn_mode"] = "torch"
         warnings.append("attn_mode 留空时使用 torch 保底；如需 flash 请先确认插件环境已安装 flash-attn")
@@ -368,3 +449,59 @@ def toml_scalar(value: Any) -> str:
 
 def dump_flat_toml(values: dict[str, Any]) -> str:
     return "".join(f"{key} = {toml_scalar(value)}\n" for key, value in values.items())
+
+
+def dump_fast_dataset_toml(values: dict[str, Any]) -> str:
+    batch_size = int_value(values.get("batch_size") or values.get("train_batch_size"), 1) or 1
+    repeats = int_value(values.get("dataset_repeats") or values.get("num_repeats"), 1) or 1
+    dataset_values = {
+        "resolution": resolution_pair(values.get("resolution", "1024,1024")),
+        "batch_size": batch_size,
+        "enable_bucket": values.get("enable_bucket", True),
+        "validation_split_num": int_value(values.get("validation_split_num"), 16),
+        "validation_seed": int_value(values.get("validation_seed"), 42),
+    }
+    for key in ("min_bucket_reso", "max_bucket_reso", "bucket_reso_steps", "bucket_no_upscale", "validation_split"):
+        if not is_empty(values.get(key)):
+            dataset_values[key] = values[key]
+
+    subset_values = {
+        "image_dir": values.get("resized_image_dir"),
+        "cache_dir": values.get("lora_cache_dir"),
+        "num_repeats": repeats,
+        "recursive": values.get("recursive", True),
+    }
+    if not is_empty(values.get("path_pattern")):
+        subset_values["path_pattern"] = values["path_pattern"]
+
+    lines = ["[general]\n"]
+    lines.append(f"caption_extension = {toml_scalar(values.get('caption_extension', '.txt'))}\n")
+    if not is_empty(values.get("keep_tokens")):
+        lines.append(f"keep_tokens = {toml_scalar(values['keep_tokens'])}\n")
+    else:
+        lines.append("keep_tokens = 3\n")
+    lines.append("\n[[datasets]]\n")
+    lines.extend(f"{key} = {toml_scalar(value)}\n" for key, value in dataset_values.items())
+    lines.append("\n  [[datasets.subsets]]\n")
+    lines.extend(f"  {key} = {toml_scalar(value)}\n" for key, value in subset_values.items() if not is_empty(value))
+    return "".join(lines)
+
+
+def ensure_fast_run_log_dirs(values: dict[str, Any], now: datetime | None = None) -> list[Path]:
+    logging_dir = values.get("logging_dir")
+    if is_empty(logging_dir):
+        return []
+    root = Path(str(logging_dir))
+    root.mkdir(parents=True, exist_ok=True)
+
+    created = [root]
+    current = now or datetime.now()
+    parts = [p for p in (values.get("method"), values.get("preset", "default")) if not is_empty(p)]
+    log_prefix = ("_".join(str(p) for p in parts) + "_") if parts else ""
+    tracker_name = str(values.get("log_tracker_name") or "network_train")
+    for offset in range(3):
+        run_dir = root / f"{log_prefix}{(current + timedelta(minutes=offset)).strftime('%Y%m%d-%H%M')}"
+        tracker_dir = run_dir / tracker_name
+        tracker_dir.mkdir(parents=True, exist_ok=True)
+        created.append(tracker_dir)
+    return created

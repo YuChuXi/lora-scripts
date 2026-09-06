@@ -36,6 +36,14 @@ class AnimaFastPluginApiTests(unittest.TestCase):
         else:
             os.environ["LORA_ENABLE_ANIMA_FAST"] = self.previous
 
+    def _make_ready_source(self, layout: ExtensionLayout) -> None:
+        layout.source.mkdir(parents=True)
+        layout.train_py.write_text("", encoding="utf-8")
+        (layout.source / "configs").mkdir()
+        (layout.source / "configs" / "base.toml").write_text("", encoding="utf-8")
+        (layout.source / "preprocess").mkdir()
+        (layout.source / "preprocess" / "resize_images.py").write_text("", encoding="utf-8")
+
     def test_preflight_fail_message_includes_errors(self):
         result = PreflightResult(
             ok=False,
@@ -120,12 +128,50 @@ class AnimaFastPluginApiTests(unittest.TestCase):
                     "mikazuki.app.api.start_install_task",
                     return_value=("task-1", {"task_id": "task-1", "log_stream": "/api/plugins/anima-lora/install/log/stream/task-1"}),
                 ) as starter:
-                response = asyncio.run(api.anima_lora_plugin_install(make_request({"source_root": str(source), "dry_run": False})))
+                response = asyncio.run(
+                    api.anima_lora_plugin_install(
+                        make_request(
+                            {
+                                "source_root": str(source),
+                                "dry_run": False,
+                                "pip_index_url": "https://pypi.tuna.tsinghua.edu.cn/simple",
+                                "pytorch_index_url": "https://mirrors.aliyun.com/pytorch-wheels",
+                                "hf_endpoint": "https://hf-mirror.com",
+                                "github_url_prefix": "https://ghfast.top/",
+                            }
+                        )
+                    )
+                )
 
         self.assertEqual(response.status, "success")
         self.assertEqual(response.data["task_id"], "task-1")
         self.assertIn("/install/log/stream/task-1", response.data["log_stream"])
         starter.assert_called_once()
+        kwargs = starter.call_args.kwargs
+        sources = kwargs.get("download_sources")
+        self.assertIsNotNone(sources)
+        self.assertEqual(sources.pip_index_url, "https://pypi.tuna.tsinghua.edu.cn/simple")
+        self.assertEqual(sources.github_url_prefix, "https://ghfast.top/")
+
+    def test_install_returns_existing_ready_status_without_reinstalling(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            layout = ExtensionLayout(root / "extensions" / "anima_lora")
+            self._make_ready_source(layout)
+            layout.venv_python.parent.mkdir(parents=True)
+            layout.venv_python.write_text("", encoding="utf-8")
+            audit = {"ok": True, "facts": {"anima": {"imports": {"torch": True}}}}
+            write_install_state(layout, STATE_READY, {"audit": audit})
+
+            with mock.patch("mikazuki.app.api.Path.cwd", return_value=root), \
+                mock.patch("mikazuki.app.api.start_install_task") as starter:
+                response = asyncio.run(api.anima_lora_plugin_install(make_request({"dry_run": False})))
+
+        self.assertEqual(response.status, "success")
+        self.assertTrue(response.data["already_ready"])
+        self.assertEqual(response.data["status"]["state"], STATE_READY)
+        self.assertEqual(response.data["message"], "Anima Fast plugin is already ready")
+        starter.assert_not_called()
 
     def test_run_rejects_anima_fast_when_extension_is_not_ready(self):
         with tempfile.TemporaryDirectory() as td:
@@ -140,8 +186,7 @@ class AnimaFastPluginApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             layout = ExtensionLayout(root / "extensions" / "anima_lora")
-            layout.source.mkdir(parents=True)
-            layout.train_py.write_text("", encoding="utf-8")
+            self._make_ready_source(layout)
             layout.venv_python.parent.mkdir(parents=True)
             layout.venv_python.write_text("", encoding="utf-8")
             write_install_state(layout, STATE_READY, {"audit": {"ok": True}})
@@ -160,8 +205,7 @@ class AnimaFastPluginApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             layout = ExtensionLayout(root / "extensions" / "anima_lora")
-            layout.source.mkdir(parents=True)
-            layout.train_py.write_text("", encoding="utf-8")
+            self._make_ready_source(layout)
             layout.venv_python.parent.mkdir(parents=True)
             layout.venv_python.write_text("", encoding="utf-8")
             write_install_state(layout, STATE_READY, {"audit": {"ok": True}})

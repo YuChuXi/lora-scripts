@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from torch.utils.tensorboard import SummaryWriter
+
 from train_monitor import server
 
 
@@ -323,6 +325,31 @@ class TrainMonitorStatusTests(unittest.TestCase):
     def test_tensorboard_scalar_tags_include_anima_finetune_loss(self):
         self.assertIn("loss", server.TENSORBOARD_SCALAR_TAGS)
         self.assertIn("loss/epoch", server.TENSORBOARD_SCALAR_TAGS)
+
+    def test_tensorboard_scalars_include_prodigy_effective_lr_tags(self):
+        with tempfile.TemporaryDirectory() as td:
+            log_dir = Path(td) / "logs" / "run"
+            writer = SummaryWriter(str(log_dir))
+            try:
+                for step in range(1, 4):
+                    writer.add_scalar("loss", 0.3 / step, step)
+                    writer.add_scalar("lr", 0.01 * step, step)
+                    writer.add_scalar("lr/base", 1.0, step)
+                    writer.add_scalar("lr/d*lr/base", 0.001 * step, step)
+                    writer.add_scalar("lr/d*eff_lr/base", 0.002 * step, step)
+            finally:
+                writer.close()
+
+            with mock.patch.object(server, "LOG_DIR", Path(td) / "logs"):
+                series = server.tensorboard_loss_scalars()
+
+        by_tag = {item["tag"]: item for item in series}
+        self.assertIn("lr", by_tag)
+        self.assertIn("lr/d*lr/base", by_tag)
+        self.assertIn("lr/d*eff_lr/base", by_tag)
+        self.assertAlmostEqual(by_tag["lr"]["latest"], 0.03, places=6)
+        self.assertAlmostEqual(by_tag["lr/d*lr/base"]["latest"], 0.003, places=6)
+        self.assertAlmostEqual(by_tag["lr/d*eff_lr/base"]["latest"], 0.006, places=6)
 
     def test_collect_status_exposes_log_loss_points_without_tensorboard(self):
         log_lines = [

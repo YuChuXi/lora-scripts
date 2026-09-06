@@ -24,20 +24,38 @@ class WaifuDiffusionInterrogator(Interrogator):
             name: str,
             model_path='model.onnx',
             tags_path='selected_tags.csv',
+            local_model_aliases: tuple[str, ...] = (),
             **kwargs
     ) -> None:
         super().__init__(name)
         self.model_path = model_path
         self.tags_path = tags_path
+        self.local_model_aliases = tuple(local_model_aliases)
         self.kwargs = kwargs
 
     def download(self) -> Tuple[os.PathLike, os.PathLike]:
-        local_paths = local_model_asset_paths(self.name, self)
-        if local_paths:
-            print(f"Loading {self.name} model from local tagger-models directory")
-            return local_paths
+        for model_key in (self.name, *self.local_model_aliases):
+            local_paths = local_model_asset_paths(model_key, self)
+            if local_paths:
+                print(
+                    f"Loading {self.name} model from local tagger-models "
+                    f"directory ({model_key})"
+                )
+                return local_paths
 
         repo_id = self.kwargs["repo_id"]
+        cache_kwargs = dict(self.kwargs)
+        cache_kwargs["local_files_only"] = True
+        try:
+            model_path = Path(hf_hub_download(
+                **cache_kwargs, filename=self.model_path))
+            tags_path = Path(hf_hub_download(
+                **cache_kwargs, filename=self.tags_path))
+            print(f"Loading {self.name} model from local Hugging Face cache")
+            return model_path, tags_path
+        except Exception:
+            pass
+
         print(f"Loading {self.name} model from {repo_id} (first run may download ~400MB, see console log)")
 
         model_path = Path(hf_hub_download(

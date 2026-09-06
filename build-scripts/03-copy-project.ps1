@@ -2,13 +2,16 @@
 # 复制项目文件到便携式环境（排除模型目录）
 
 param(
-    [string]$BuildDir = (Join-Path (Split-Path $PSScriptRoot -Parent) "build\sd-trainer-portable"),
+    [string]$BuildDir = (Join-Path (Split-Path $PSScriptRoot -Parent) "build\next-trainer-portable"),
     [string]$ProjectRoot = (Split-Path $PSScriptRoot -Parent)
 )
 
 $ErrorActionPreference = "Stop"
 
 Write-Host "=== 复制项目文件 ===" -ForegroundColor Cyan
+
+& (Join-Path $ProjectRoot "build-scripts\00-build-frontend.ps1") -ProjectRoot $ProjectRoot
+if ($LASTEXITCODE -ne 0) { throw "前端构建失败" }
 
 # 确保子模块已初始化
 Write-Host "初始化 git 子模块..."

@@ -7,11 +7,12 @@
 
 | 成员 | 角色 | 主要负责 | 写代码 | 备注 |
 |------|------|----------|--------|------|
-| [@wochenlong](https://github.com/wochenlong) | 项目负责人 | 全栈；发布 / 合 `main` / PR review；项目级决策 | 是 | 契约路径与发版最终审批 |
+| [@wochenlong](https://github.com/wochenlong) | 项目负责人 | 全栈；**产品 / 信息架构**；发布 / 合 `main` / PR review；项目级决策 | 是 | 契约路径与发版最终审批；四栏 IA 等产品定稿见 [#215](https://github.com/wochenlong/lora-scripts-next/issues/215) |
 | [@SupermarKleet](https://github.com/SupermarKleet) | UI / 美术 | 界面设计、品牌与素材（看板娘、Logo 等） | **否** | 交付设计稿与资产，由开发落地到 `frontend/dist` 或 patch |
 | [@ageless-h](https://github.com/ageless-h) | 后端开发 | Anima / sd-scripts 后端、整合包相关修复 | 是 | **未来约 1～2 周较忙，暂不接新任务**；紧急项由项目负责人协调 |
 | [@niangao2331](https://github.com/niangao2331) | 开发（vibe coding） | 打标器、Dataset Tag Editor | 是 | 若实践后难以独立维护该模块，可改任 **Issue 分诊**（仍参与协作，调整职责） |
 | [@MikumikuDAIFans](https://github.com/MikumikuDAIFans) | 开发（vibe coding） | 训练引擎相关、**端口与路径治理**（草案见 `docs/design/ports/`） | 是 | 先小步落地 P0；方案为草案，合入前经 Discussion / PR review |
+| [@IryNeko](https://github.com/IryNeko) | 前端负责人 | Vue3 前端工程与工作台实现（初版与持续迭代；`dev` / [#209](https://github.com/wochenlong/lora-scripts-next/pull/209)） | 是 | 对外头衔为前端负责人；Vue3 前端工程主力 |
 
 ### 领域负责人（DRI）
 
@@ -20,7 +21,9 @@
 | 领域 | DRI | 备份 / 协调 |
 |------|-----|-------------|
 | 项目级 / Release / 合 `main` | @wochenlong | — |
+| 产品信息架构（四栏 / 工作台） | @wochenlong | — |
 | UI / 品牌素材 | @SupermarKleet（出图） | @wochenlong（进仓库） |
+| 前端工程（Vue3 / `dev`） | @IryNeko | @wochenlong |
 | 打标 / Dataset Tag Editor | @niangao2331 | @wochenlong |
 | 端口、启动、`gui.py` 子服务 | @MikumikuDAIFans | @wochenlong |
 | 训练引擎 / Anima 后端 / sd-scripts | @MikumikuDAIFans（引擎与端口线） | @ageless-h（恢复后）、@wochenlong |
@@ -59,7 +62,8 @@
 | **PR Review** | 当前阶段 @wochenlong |
 | **`main`** | 可发布基线；**不直接在 `main` 开发**，功能分支 + PR |
 
-整合包见 [`build/整合包打包规范.md`](../../build/整合包打包规范.md)。
+整合包构建与发包（公开、可协作）：[`docs/portable-build-guide.md`](../portable-build-guide.md)。  
+目录契约与更新机制：[`docs/portable-packaging-git-update.md`](../portable-packaging-git-update.md)。
 
 ---
 

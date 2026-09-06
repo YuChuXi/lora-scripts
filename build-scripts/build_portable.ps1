@@ -6,16 +6,21 @@ param(
     [switch]$Clean,
     [switch]$Skip7z,
     [switch]$SkipTaggerPrefetch,
-    [string]$TaggerCacheSource = ""
+    [string]$TaggerCacheSource = "",
+    # Lite (default): no Anima Fast runtime — GitHub upload target (<2 GB compressed).
+    # Full: bundle extensions/anima_lora including .venv for Baidu Netdisk.
+    [switch]$BundleAnimaFast,
+    [string]$AnimaFastSource = "",
+    [string]$PackageSuffix = ""
 )
 
 $ErrorActionPreference = "Stop"
 $startTime = Get-Date
 
 $buildDir    = Join-Path $ProjectRoot "build"
-$portableDir = Join-Path $buildDir "SD-Trainer-Portable"
+$portableDir = Join-Path $buildDir "Next-Trainer-Portable"
 $pythonDir   = Join-Path $portableDir "python_embeded"
-$sdtDir      = Join-Path $portableDir "SD-Trainer"
+$sdtDir      = Join-Path $portableDir "Next-Trainer"
 $tempGitCloneDir = Join-Path $buildDir "_portable_git_metadata"
 
 $7zExe = "C:\Program Files\7-Zip\7z.exe"
@@ -25,8 +30,11 @@ if (-not (Test-Path $7zExe)) {
 }
 
 Write-Host ""
-Write-Host "  SD-Trainer Portable Package Builder  v$Version" -ForegroundColor Cyan
+Write-Host "  Next Trainer Portable Package Builder  v$Version" -ForegroundColor Cyan
 Write-Host ""
+
+& (Join-Path $ProjectRoot "build-scripts\00-build-frontend.ps1") -ProjectRoot $ProjectRoot
+if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" }
 
 # ---- Clean ----
 
@@ -35,6 +43,33 @@ if ($Clean -and (Test-Path $portableDir)) {
     Remove-Item $portableDir -Recurse -Force
 }
 New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
+
+function Copy-PortableBatchFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    if (-not (Test-Path $Source)) {
+        throw "Batch source not found: $Source"
+    }
+    $dir = Split-Path $Destination -Parent
+    if ($dir -and -not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $text = [System.IO.File]::ReadAllText($Source)
+    $text = $text -replace "`r`n", "`n" -replace "`r", "`n" -replace "`n", "`r`n"
+    if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) {
+        $text = $text.Substring(1)
+    }
+    [System.IO.File]::WriteAllText($Destination, $text, (New-Object System.Text.UTF8Encoding $false))
+}
+
+function Normalize-PortableBatchFilesInTree {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    Get-ChildItem -Path $Root -Filter "*.bat" -Recurse -File | ForEach-Object {
+        Copy-PortableBatchFile -Source $_.FullName -Destination $_.FullName
+    }
+}
 
 function Invoke-GitChecked {
     param(
@@ -64,7 +99,7 @@ function Initialize-DatasetTagEditor {
 
 function Clone-SDTrainerGitMetadata {
     param([string]$Destination)
-    Write-Host "  Embedding shallow .git metadata for Update-SD-Trainer.bat..."
+    Write-Host "  Embedding shallow .git metadata for Update-Next-Trainer.bat..."
     if (Test-Path $tempGitCloneDir) {
         Remove-Item $tempGitCloneDir -Recurse -Force
     }
@@ -77,7 +112,7 @@ function Clone-SDTrainerGitMetadata {
     if ($LASTEXITCODE -ne 0) {
         throw "failed to clone shallow git metadata from $remote"
     }
-    $dstGit = Join-Path $Destination "SD-Trainer\.git"
+    $dstGit = Join-Path $Destination "Next-Trainer\.git"
     if (Test-Path $dstGit) {
         Remove-Item $dstGit -Recurse -Force
     }
@@ -85,14 +120,15 @@ function Clone-SDTrainerGitMetadata {
     Remove-Item $tempGitCloneDir -Recurse -Force
 
     if (-not (Test-Path (Join-Path $dstGit "HEAD"))) {
-        throw "embedded SD-Trainer\.git is missing HEAD"
+        throw "embedded Next-Trainer\.git is missing HEAD"
     }
 }
 
 function Write-PortableBuildMetadata {
     param(
         [string]$TrainerDir,
-        [string]$Version
+        [string]$Version,
+        [string]$Flavor = "lite"
     )
     $sha = (& git -C $ProjectRoot rev-parse --short HEAD 2>$null | Select-Object -First 1)
     if ($sha) { $sha = $sha.Trim() } else { $sha = "unknown" }
@@ -102,8 +138,61 @@ function Write-PortableBuildMetadata {
         $sha
         "built_at=$utc"
         "version=$Version"
+        "flavor=$Flavor"
     ) | Set-Content $path -Encoding UTF8
-    Write-Host "  Wrote PORTABLE_BUILD ($sha)"
+    Write-Host "  Wrote PORTABLE_BUILD ($sha, flavor=$Flavor)"
+}
+
+function Resolve-AnimaFastSource {
+    param(
+        [string]$Explicit,
+        [string]$Root
+    )
+    if ($Explicit -and (Test-Path $Explicit)) {
+        return (Resolve-Path $Explicit).Path
+    }
+    $candidates = @(
+        (Join-Path $Root "extensions\anima_lora"),
+        (Join-Path (Split-Path $Root -Parent) "lora-scripts-next\extensions\anima_lora")
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path (Join-Path $c ".venv\Scripts\python.exe")) {
+            return (Resolve-Path $c).Path
+        }
+    }
+    return $null
+}
+
+function Copy-AnimaFastRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$TrainerDir
+    )
+    $venvPy = Join-Path $SourceRoot ".venv\Scripts\python.exe"
+    if (-not (Test-Path $venvPy)) {
+        throw "Anima Fast source missing .venv: $SourceRoot"
+    }
+    $dst = Join-Path $TrainerDir "extensions\anima_lora"
+    New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force | Out-Null
+    if (Test-Path $dst) {
+        Remove-Item $dst -Recurse -Force
+    }
+    Write-Host "  Bundling Anima Fast from: $SourceRoot"
+    # Keep install_state / source / .venv; drop bulky caches that are regenerable.
+    $xd = @("__pycache__", ".git", ".cache", "pip-cache", "__pycache__")
+    $xdArgs = @()
+    foreach ($name in $xd) { $xdArgs += "/XD"; $xdArgs += $name }
+    $null = robocopy $SourceRoot $dst /E /NFL /NDL /NJH /NJS /NC /NS /XF "*.pyc" $xdArgs
+    if ($LASTEXITCODE -ge 8) {
+        throw "robocopy Anima Fast failed (exit $LASTEXITCODE)"
+    }
+    if (-not (Test-Path (Join-Path $dst ".venv\Scripts\python.exe"))) {
+        throw "Anima Fast bundle incomplete: missing .venv after copy"
+    }
+    if (-not (Test-Path (Join-Path $dst "install_state.json"))) {
+        Write-Host "  WARNING: install_state.json missing; Fast UI may require re-audit" -ForegroundColor Yellow
+    }
+    Write-Host "  Bundled extensions/anima_lora (full flavor)" -ForegroundColor Green
 }
 
 function Resolve-TaggerCacheSource {
@@ -117,7 +206,7 @@ function Resolve-TaggerCacheSource {
     $modelDirName = "models--SmilingWolf--wd-v1-4-convnextv2-tagger-v2"
     $candidates = @()
     foreach ($dir in Get-ChildItem $BuildDirectory -Directory -ErrorAction SilentlyContinue) {
-        if ($dir.Name -notlike "SD-Trainer*") { continue }
+        if ($dir.Name -notlike "Next-Trainer*") { continue }
         $hubModel = Join-Path $dir.FullName "huggingface\hub\$modelDirName"
         if (Test-Path $hubModel) {
             $candidates += $dir.FullName
@@ -143,9 +232,22 @@ function Copy-TaggerCacheFromSource {
         if ($LASTEXITCODE -le 7) { $copied = $true }
     }
 
-    $srcWd14 = Join-Path $SourceRoot "tagger-models\wd14"
+    # Accept portable root, tagger-models/, or wd14/ as -TaggerCacheSource.
+    $wd14Candidates = @(
+        (Join-Path $SourceRoot "tagger-models\wd14"),
+        (Join-Path $SourceRoot "wd14"),
+        $SourceRoot
+    )
+    $srcWd14 = $null
+    foreach ($candidate in $wd14Candidates) {
+        $probe = Join-Path $candidate "wd14-convnextv2-v2\model.onnx"
+        if (Test-Path $probe) {
+            $srcWd14 = $candidate
+            break
+        }
+    }
     $dstWd14 = Join-Path $DestinationPortable "tagger-models\wd14"
-    if (Test-Path $srcWd14) {
+    if ($srcWd14) {
         New-Item -ItemType Directory -Path $dstWd14 -Force | Out-Null
         $null = robocopy $srcWd14 $dstWd14 /E /NFL /NDL /NJH /NJS /NC /NS
         if ($LASTEXITCODE -le 7) { $copied = $true }
@@ -178,8 +280,8 @@ if (Test-Path $pythonExe) {
 
 # python310._pth (include Lib/ so bundled tkinter is importable)
 $pthLines = @(
-    "../SD-Trainer",
-    "../SD-Trainer/vendor/sd-scripts",
+    "../Next-Trainer",
+    "../Next-Trainer/vendor/sd-scripts",
     "python310.zip",
     "Lib",
     "Lib/site-packages",
@@ -392,7 +494,25 @@ foreach ($file in $copyFiles) {
     }
 }
 Clone-SDTrainerGitMetadata -Destination $portableDir
-Write-PortableBuildMetadata -TrainerDir $sdtDir -Version $Version
+
+$packageFlavor = if ($BundleAnimaFast) { "full" } else { "lite" }
+if (-not $PackageSuffix) {
+    $PackageSuffix = $packageFlavor
+}
+
+if ($BundleAnimaFast) {
+    Write-Host ""
+    Write-Host "[2b/6] Bundling Anima Fast runtime (full package)..." -ForegroundColor Cyan
+    $fastSrc = Resolve-AnimaFastSource -Explicit $AnimaFastSource -Root $ProjectRoot
+    if (-not $fastSrc) {
+        throw "BundleAnimaFast requested but no usable extensions/anima_lora (.venv) found. Pass -AnimaFastSource."
+    }
+    Copy-AnimaFastRuntime -SourceRoot $fastSrc -TrainerDir $sdtDir
+} else {
+    Write-Host "  Lite package: Anima Fast runtime NOT bundled (install via WebUI)" -ForegroundColor Yellow
+}
+
+Write-PortableBuildMetadata -TrainerDir $sdtDir -Version $Version -Flavor $packageFlavor
 Write-Host "  Copied root files"
 Write-Host "  Done" -ForegroundColor Green
 
@@ -483,15 +603,70 @@ if ($SkipTaggerPrefetch) {
     }
 }
 
+Write-Host ""
+Write-Host "[3b/6] Bundling SD/SDXL/Flux tokenizer cache (~8 MB, offline training)..." -ForegroundColor Cyan
+
+$tokenizerCacheDir = Join-Path $portableDir "tokenizer-cache"
+New-Item -ItemType Directory -Path $tokenizerCacheDir -Force | Out-Null
+$tokenizerPrefetchScript = Join-Path $sdtDir "scripts\prefetch_sdxl_tokenizer.py"
+if (-not (Test-Path $tokenizerPrefetchScript)) {
+    throw "prefetch script missing: $tokenizerPrefetchScript"
+}
+
+$tokenizerPrefetchPython = $null
+if (Test-Path $pythonExe) {
+    $tokenizerPrefetchPython = $pythonExe
+} elseif (Test-Path (Join-Path $ProjectRoot "venv\Scripts\python.exe")) {
+    $tokenizerPrefetchPython = (Join-Path $ProjectRoot "venv\Scripts\python.exe")
+} elseif (Get-Command python -ErrorAction SilentlyContinue) {
+    $tokenizerPrefetchPython = (Get-Command python).Source
+}
+if (-not $tokenizerPrefetchPython) {
+    throw "No Python available for SDXL tokenizer prefetch"
+}
+
+$prevEapTokenizer = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+if ($tokenizerPrefetchPython -eq $pythonExe) {
+    if (Test-Path $getPipPath) {
+        & $pythonExe $getPipPath --no-warn-script-location 2>&1 | Out-Null
+    }
+    & $tokenizerPrefetchPython -s -m pip install -q modelscope requests 2>&1 | Out-Null
+    & $tokenizerPrefetchPython -s $tokenizerPrefetchScript --cache-dir $tokenizerCacheDir --if-missing --prefer-modelscope
+} else {
+    & $tokenizerPrefetchPython -m pip install -q modelscope requests 2>&1 | Out-Null
+    & $tokenizerPrefetchPython $tokenizerPrefetchScript --cache-dir $tokenizerCacheDir --if-missing --prefer-modelscope
+}
+$tokenizerPrefetchExit = $LASTEXITCODE
+$ErrorActionPreference = $prevEapTokenizer
+if ($tokenizerPrefetchExit -ne 0) {
+    throw "SDXL tokenizer prefetch failed (exit $tokenizerPrefetchExit)"
+}
+Write-Host "  Cached under tokenizer-cache/ (offline SD/SDXL/Flux tokenizers)" -ForegroundColor Green
+
+$tokenizerBundles = @(
+    @{ Folder = "openai_clip-vit-large-patch14"; Files = @("vocab.json", "merges.txt", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json") },
+    @{ Folder = "laion_CLIP-ViT-bigG-14-laion2B-39B-b160k"; Files = @("vocab.json", "merges.txt", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json") },
+    @{ Folder = "google_t5-v1_1-xxl"; Files = @("spiece.model", "tokenizer_config.json", "special_tokens_map.json") }
+)
+foreach ($bundle in $tokenizerBundles) {
+    foreach ($name in $bundle.Files) {
+        $path = Join-Path $tokenizerCacheDir "$($bundle.Folder)\$name"
+        if (-not (Test-Path $path)) {
+            throw "Tokenizer cache incomplete after prefetch: $path"
+        }
+    }
+}
+
 # ==== Step 4: Create launcher scripts ====
 
 Write-Host ""
 Write-Host "[4/6] Creating launcher scripts..." -ForegroundColor Cyan
 
-# run_gui_portable.bat — root shim (logic lives in SD-Trainer/scripts/portable/, updates with project)
+# run_gui_portable.bat — root shim (logic lives in Next-Trainer/scripts/portable/, updates with project)
 $shimSrc = Join-Path $ProjectRoot "scripts\portable\run_gui_portable_shim.bat"
 if (Test-Path $shimSrc) {
-    Copy-Item $shimSrc -Destination (Join-Path $portableDir "run_gui_portable.bat") -Force
+    Copy-PortableBatchFile $shimSrc (Join-Path $portableDir "run_gui_portable.bat")
     Write-Host "  Created run_gui_portable.bat (shim -> scripts/portable/launch_portable.bat)"
 } else {
     Write-Host "  WARNING: scripts/portable/run_gui_portable_shim.bat not found" -ForegroundColor Yellow
@@ -501,7 +676,7 @@ if (Test-Path $shimSrc) {
 # python_embeded and dispatches to run_gui_portable.bat).
 $repoRunGui = Join-Path $ProjectRoot "run_gui.bat"
 if (Test-Path $repoRunGui) {
-    Copy-Item $repoRunGui -Destination (Join-Path $portableDir "run_gui.bat") -Force
+    Copy-PortableBatchFile $repoRunGui (Join-Path $portableDir "run_gui.bat")
     Write-Host "  Copied run_gui.bat (unified launcher from repo)"
 } else {
     Write-Host "  WARNING: run_gui.bat not found in repo root" -ForegroundColor Yellow
@@ -512,16 +687,16 @@ $updateDir = Join-Path $portableDir "update"
 New-Item -ItemType Directory -Path $updateDir -Force | Out-Null
 
 $updateBat = "@echo off`r`nchcp 65001 >nul 2>&1`r`n"
-$updateBat += "call `"%~dp0..\Update-SD-Trainer.bat`" %*`r`n"
+$updateBat += "call `"%~dp0..\Update-Next-Trainer.bat`" %*`r`n"
 $updateBat += "exit /b %errorlevel%`r`n"
 [System.IO.File]::WriteAllText(
-    (Join-Path $updateDir "update_sd_trainer.bat"),
+    (Join-Path $updateDir "update_next_trainer.bat"),
     $updateBat,
     (New-Object System.Text.UTF8Encoding $false)
 )
 
 $updateReleaseBat = "@echo off`r`nchcp 65001 >nul 2>&1`r`n"
-$updateReleaseBat += "call `"%~dp0..\Update-SD-Trainer-Release.bat`" %*`r`n"
+$updateReleaseBat += "call `"%~dp0..\Update-Next-Trainer-Release.bat`" %*`r`n"
 $updateReleaseBat += "exit /b %errorlevel%`r`n"
 [System.IO.File]::WriteAllText(
     (Join-Path $updateDir "update_from_release.bat"),
@@ -532,7 +707,7 @@ $updateReleaseBat += "exit /b %errorlevel%`r`n"
 $updateDepsBat = "@echo off`r`nchcp 65001 >nul 2>&1`r`ncd /d `"%~dp0..`"`r`n"
 $updateDepsBat += "echo Updating Python dependencies...`r`n"
 $updateDepsBat += "`"python_embeded\python.exe`" -s -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128`r`n"
-$updateDepsBat += "`"python_embeded\python.exe`" -s -m pip install --upgrade -r `"SD-Trainer\requirements.txt`"`r`n"
+$updateDepsBat += "`"python_embeded\python.exe`" -s -m pip install --upgrade -r `"Next-Trainer\requirements.txt`"`r`n"
 $updateDepsBat += "echo Done.`r`npause`r`n"
 [System.IO.File]::WriteAllText(
     (Join-Path $updateDir "update_dependencies.bat"),
@@ -564,30 +739,55 @@ Write-Host "  Created install_xformers.bat"
 $templateDir = Join-Path $PSScriptRoot "templates"
 $portableTemplateDir = Join-Path $sdtDir "scripts\portable\templates"
 New-Item -ItemType Directory -Path $portableTemplateDir -Force | Out-Null
-foreach ($bat in @("Update-SD-Trainer.bat", "Update-SD-Trainer-Release.bat", "Download-Anima-Model.bat")) {
+foreach ($bat in @(
+        "Update-Next-Trainer.bat",
+        "Update-Next-Trainer-Release.bat",
+        "Update-SD-Trainer.bat",
+        "Update-SD-Trainer-Release.bat",
+        "Download-Anima-Model.bat",
+        "Fix-Portable-Bats.bat"
+    )) {
     $src = Join-Path $templateDir $bat
     if (-not (Test-Path $src)) {
         $src = Join-Path $ProjectRoot $bat
     }
     if (Test-Path $src) {
-        Copy-Item $src -Destination (Join-Path $portableDir $bat)
-        Copy-Item $src -Destination (Join-Path $portableTemplateDir $bat)
+        Copy-PortableBatchFile $src (Join-Path $portableDir $bat)
+        Copy-PortableBatchFile $src (Join-Path $portableTemplateDir $bat)
         Write-Host "  Created $bat"
     }
 }
+
+Write-Host "  Normalizing .bat line endings (CRLF) for Windows cmd..."
+Normalize-PortableBatchFilesInTree -Root $portableDir
 
 # ==== Step 5: Empty dirs + README ====
 
 Write-Host ""
 Write-Host "[5/6] Creating user directories and README..." -ForegroundColor Cyan
 
-foreach ($d in @("sd-models", "output", "logs", "huggingface", "tagger-models", "tagger-models\wd14", "tagger-models\vlm")) {
+foreach ($d in @("sd-models", "output", "logs", "train")) {
+    $p = Join-Path $sdtDir $d
+    New-Item -ItemType Directory -Path $p -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $p ".gitkeep"), "")
+}
+
+foreach ($d in @("huggingface", "tagger-models", "tagger-models\wd14", "tagger-models\vlm")) {
     $p = Join-Path $portableDir $d
     New-Item -ItemType Directory -Path $p -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $p ".gitkeep"), "")
 }
 
-$readme = "SD-Trainer Portable`r`n"
+$linkScript = Join-Path $sdtDir "scripts\portable\link_portable_data_dirs.py"
+if (Test-Path $linkScript) {
+    Write-Host "  Ensuring Next-Trainer data dirs + portable-root junctions..." -ForegroundColor Green
+    & $pythonExe -s $linkScript --trainer-dir $sdtDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  WARNING: portable data-dir junction step failed (exit $LASTEXITCODE)" -ForegroundColor Yellow
+    }
+}
+
+$readme = "Next Trainer Portable`r`n"
 $readme += "===================`r`n`r`n"
 $readme += "Quick Start:`r`n"
 $readme += "  1. Double-click run_gui.bat`r`n"
@@ -600,18 +800,19 @@ $readme += "  Future VLM caption models can be placed under tagger-models/vlm/<m
 $readme += "  with the files required by that model, such as model.onnx and selected_tags.csv.`r`n`r`n"
 $readme += "Directories:`r`n"
 $readme += "  run_gui.bat      - Stable entrypoint for portable users`r`n"
-$readme += "  run_gui_portable.bat - Legacy shim (logic in SD-Trainer/scripts/portable/)`r`n"
+$readme += "  run_gui_portable.bat - Legacy shim (logic in Next-Trainer/scripts/portable/)`r`n"
 $readme += "  python_embeded/  - Python runtime`r`n"
-$readme += "  SD-Trainer/      - Project files`r`n"
-$readme += "  sd-models/       - Put your models here`r`n"
-$readme += "  output/          - Training output`r`n"
-$readme += "  logs/            - Logs`r`n`r`n"
+$readme += "  Next-Trainer/      - Project files`r`n"
+$readme += "  Next-Trainer\\sd-models\\  - Models (file picker; put models here)`r`n"
+$readme += "  Next-Trainer\\output\\    - Training output`r`n"
+$readme += "  Next-Trainer\\logs\\       - Logs`r`n"
+$readme += "  sd-models\\ / output\\ / logs\\ at package root - junctions to Next-Trainer (legacy paths)`r`n"
 $readme += "  tagger-models/   - Local tagger models`r`n`r`n"
 $readme += "Update:`r`n"
-$readme += "  Update-SD-Trainer.bat                - Git update (recommended if .git exists)`r`n"
-$readme += "  Update-SD-Trainer-Release.bat      - Download latest Release 7z and merge`r`n"
-$readme += "  update\update_sd_trainer.bat       - Shortcut to Update-SD-Trainer.bat`r`n"
-$readme += "  update\update_from_release.bat     - Shortcut to Update-SD-Trainer-Release.bat`r`n"
+$readme += "  Update-Next-Trainer.bat                - Git update (recommended if .git exists)`r`n"
+$readme += "  Update-Next-Trainer-Release.bat      - Download latest Release 7z and merge`r`n"
+$readme += "  update\update_next_trainer.bat       - Shortcut to Update-Next-Trainer.bat`r`n"
+$readme += "  update\update_from_release.bat     - Shortcut to Update-Next-Trainer-Release.bat`r`n"
 $readme += "  update\update_dependencies.bat     - Update Python packages`r`n`r`n"
 $readme += "Requirements:`r`n"
 $readme += "  - Windows 10/11 64-bit`r`n"
@@ -622,7 +823,7 @@ $readme += "  If xformers is missing, double-click install_xformers.bat to insta
 $readme += "  xformers provides faster attention than PyTorch SDPA on most GPUs.`r`n`r`n"
 $readme += "Flash Attention 2:`r`n"
 $readme += "  This portable package does NOT use flash-attn (uses xformers / PyTorch SDPA).`r`n"
-$readme += "  Do not pip install flash-attn into python_embeded. See README in SD-Trainer/.`r`n"
+$readme += "  Do not pip install flash-attn into python_embeded. See README in Next-Trainer/.`r`n"
 [System.IO.File]::WriteAllText(
     (Join-Path $portableDir "README.txt"),
     $readme,
@@ -640,16 +841,81 @@ if (-not $Skip7z) {
     if (-not $7zExe) {
         Write-Host "  [!] 7-Zip not found, skipping compression." -ForegroundColor Yellow
     } else {
-        $archiveName = "SD-Trainer-v${Version}.7z"
+        $suffixPart = if ($PackageSuffix) { "-$PackageSuffix" } else { "" }
+        $archiveName = "Next-Trainer-v${Version}${suffixPart}.7z"
         $archivePath = Join-Path $buildDir $archiveName
         if (Test-Path $archivePath) { Remove-Item $archivePath -Force }
 
-        Write-Host "  Compressing..."
-        & $7zExe a -t7z -mx=9 -m0=LZMA2:d=64m -mmt=on $archivePath "$portableDir\*" | Out-Null
+        # 7-Zip follows Windows directory junctions and its recursive exclude
+        # patterns also match same-named canonical dirs under Next-Trainer.
+        # Temporarily remove only the portable-root compatibility junctions.
+        $archiveJunctionNames = @("sd-models", "output", "logs", "train")
+        foreach ($name in $archiveJunctionNames) {
+            $canonicalPath = Join-Path $sdtDir $name
+            $unexpected = @(
+                Get-ChildItem -LiteralPath $canonicalPath -Force -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -ne ".gitkeep" }
+            )
+            if ($unexpected.Count -gt 0) {
+                throw "refusing to archive non-empty generated data directory: $canonicalPath (use -Clean)"
+            }
+        }
+        $removedArchiveJunctions = @()
+        $archiveExitCode = 1
+        $restoreExitCode = 0
+        try {
+            foreach ($name in $archiveJunctionNames) {
+                $junctionPath = Join-Path $portableDir $name
+                $item = Get-Item -LiteralPath $junctionPath -Force -ErrorAction SilentlyContinue
+                if (-not $item) {
+                    throw "portable-root data junction missing before archive: $junctionPath"
+                }
+                if (-not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                    throw "expected portable-root data junction before archive: $junctionPath"
+                }
+                $removeCommand = 'rmdir "' + $junctionPath + '"'
+                & cmd.exe /d /c $removeCommand | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    throw "failed to remove archive-time junction: $junctionPath"
+                }
+                $removedArchiveJunctions += $name
+            }
+
+            Write-Host "  Compressing..."
+            & $7zExe a -t7z -mx=9 -m0=LZMA2:d=64m -mmt=on $archivePath "$portableDir\*" | Out-Null
+            $archiveExitCode = $LASTEXITCODE
+        } finally {
+            if ($removedArchiveJunctions.Count -gt 0 -and (Test-Path $linkScript)) {
+                & $pythonExe -s $linkScript --trainer-dir $sdtDir | Out-Null
+                $restoreExitCode = $LASTEXITCODE
+                if ($restoreExitCode -eq 0) {
+                    foreach ($name in $removedArchiveJunctions) {
+                        $restoredPath = Join-Path $portableDir $name
+                        $restoredItem = Get-Item -LiteralPath $restoredPath -Force -ErrorAction SilentlyContinue
+                        if (-not $restoredItem -or -not ($restoredItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                            $restoreExitCode = 1
+                            break
+                        }
+                    }
+                }
+            } elseif ($removedArchiveJunctions.Count -gt 0) {
+                $restoreExitCode = 1
+            }
+        }
+        if ($archiveExitCode -ne 0) {
+            throw "7-Zip archive creation failed (exit $archiveExitCode)"
+        }
+        if ($restoreExitCode -ne 0) {
+            throw "failed to restore portable-root data junctions after archive"
+        }
 
         $sizeBytes = (Get-Item $archivePath).Length
         $sizeMB = [math]::Round($sizeBytes / 1MB, 1)
-        Write-Host "  Output: $archiveName  ($sizeMB MB)" -ForegroundColor Green
+        $sizeGB = [math]::Round($sizeBytes / 1GB, 2)
+        Write-Host "  Output: $archiveName  ($sizeMB MB / $sizeGB GB)  flavor=$packageFlavor" -ForegroundColor Green
+        if ($packageFlavor -eq "lite" -and $sizeBytes -ge 2GB) {
+            Write-Host "  WARNING: lite package exceeds 2 GB GitHub soft target" -ForegroundColor Yellow
+        }
     }
 } else {
     Write-Host ""

@@ -1,6 +1,276 @@
 # 更新日志
 
-本文件记录 **wochenlong/lora-scripts-next** 面向镜像与 AutoDL 的发行说明；上游 kohya-ss/sd-scripts 的变更请见其仓库。
+本文件记录 **wochenlong/lora-scripts-next**（产品名 **Next Trainer**）面向镜像与 AutoDL 的发行说明；上游 kohya-ss/sd-scripts 的变更请见其仓库。
+
+---
+## 未发布（dev）
+
+### 修复
+
+- **Anima Fast 引擎切换串台（#271）**：从 Kohya 切到 Anima Fast 时，不再把 `model_train_type=anima-lora` 与 Kohya 默认 `cache_*=true` 带进 Fast；提交时按页面 schema 强制 `anima-lora-fast`，避免静默启动 `anima_train_network.py`
+- 排队任务、插件安装任务不再误显示正在运行任务的 Loss 曲线 / 预览图；运维任务详情隐藏训练专属面板与 TensorBoard 入口
+- 已结束任务的 Loss / 预览数据窗口限定在其运行时段内，不再混入后续任务的数据（含同输出名复跑场景）
+
+### 新增
+
+- **训练任务队列**：训练任务分「算力 / 维护」双通道。算力任务（训练）串行执行，繁忙时自动排队，不再报「无法创建训练任务」；维护任务（插件安装 / 模型下载）与训练并行，互不阻塞
+- 队列**持久化**：排队中的训练在服务重启后不丢失（`logs/task_queue.json`），恢复后需手动确认「开始执行」；重启时正在跑的任务标记为「失败 · 服务重启导致中断」
+- 任务页：排队中 / 待确认状态标签、队列位置角标、「移出队列」「开始执行」「重新排队」（失败/已终止任务可按原配置回队列，Musubi 三阶段整组重排）；进行中列表按 运行中 → 排队顺序 排列
+
+---
+## v3.0.0 — 2026-08-16
+
+> **正式版（Vue3）**：二测训练路径通过后的首个正式号。`VERSION` / 侧栏显示 **`3.0.0`**。整合包与 GitHub Release 归档名使用 `Next-Trainer-v3.0.0-*.7z`（发布时更新下载链接）。  
+> **分支说明**：在默认分支切换完成前，代码仍合入 `dev`；`main` 上的 **v2.9.1 旧 UI** 将迁到 `legacy`（或等价冻结分支），随后 `main` 对齐本线。
+
+### 产品
+
+- Vue 3 四栏工作台：训练 / 数据集 / 任务 / 设置（模型 × 引擎 × 目标）
+- 品牌统一为 **Next Trainer**
+- **Krea 2** LoRA：Musubi 引擎一体化（与 Kohya / Anima Fast 并列管理）
+- 设置 → 训练引擎安装 / 就绪态；下载源偏好（国内镜像友好）
+- 任务页：预览图、Loss、内嵌日志；预览/Loss 可收起；侧栏「任务」角标提示进行中训练
+- Linux / 远程：网页内服务端路径浏览（不再依赖本机文件对话框）
+- 数据集：打标 + 以图为主的标签编辑工作流（Vue3）
+
+### 整合包（发布时）
+
+- **lite**：无 Fast / Musubi 运行时，内置 WD 打标；体积小，适合先开 UI
+- **kohya** / **musubi** 分轨（或 kohya-musubi 满配）：按场景下载，避免 30G 系统盘硬塞三引擎
+- 归档前缀：`Next-Trainer-v3.0.0-`
+
+### 相对 2.9.x RC 的说明
+
+- 内测 / RC（`2.9.2-beta.*` / `2.9.2-rc.1`）功能并入本正式号
+- 旧 UI 用户：继续使用 **v2.9.1** 整合包，或切换后从 `legacy` 获取
+
+---
+## v2.9.2-beta.3 — 2026-08-08
+
+> **内测线（pre-release）**：冷启动依赖安装热修。合入 `dev`，**不替代** `main` 稳定版 v2.9.1。
+
+### 修复
+
+- 将 `tensorboard` 升至 `2.14.0`，与 `protobuf==3.20.3` 兼容；修复整合包首次 `pip install -r requirements.txt` 因现代 pip 严格解析而 **硬失败**（旧钉 `tensorboard==2.10.1` 要求 `protobuf<3.20`）
+
+### 整合包
+
+- 归档名：`Next-Trainer-v2.9.2-beta.3-lite.7z` / `-full.7z`（包内目录仍为 `SD-Trainer/`）
+- **lite** → GitHub Release；**full** → 魔搭 `windsing/next-trainer-portable`
+
+---
+## v2.9.2-beta.2 — 2026-08-07
+
+> **内测线（pre-release）**：在 `2.9.2-beta.1` 上的整合包热修。合入 `dev`，**不替代** `main` 稳定版 v2.9.1。
+
+### 修复
+
+- Windows 启动时不再打开未就绪/未启用的训练监控页（避免空白 `127.0.0.1:6008` / `ERR_CONNECTION_REFUSED`）
+- 仅在监控进程实际启动且端口可连时才打开浏览器标签；也可用 WebUI `/train-monitor`
+
+### 整合包
+
+- 归档名：`Next-Trainer-v2.9.2-beta.2-lite.7z` / `-full.7z`（包内目录仍为 `SD-Trainer/`）
+- **lite** → GitHub Release；**full** → 魔搭 `windsing/next-trainer-portable`
+
+---
+## v2.9.2-beta.1 — 2026-08-07
+
+> **内测线（pre-release）**：Vue3 信息架构重写。合入 `dev`，**不替代** `main` 上的稳定版 v2.9.1。  
+> **版本约定**：内测一律使用 **`2.9.x`**（如 `2.9.2-beta.N`）；**正式版才用 `3.0.0`**，便于按版本号定位问题。界面品牌为 **Next Trainer**。
+
+### 产品
+
+- 四栏 IA：训练 / 数据集 / 任务 / 设置（模型 × 引擎 × 目标工作台）
+- 界面品牌统一为 **Next Trainer**
+- 设置 → 训练引擎管理；Anima Fast 就绪态仅显示「训练环境准备就绪」
+- 任务页：预览图、Loss、内嵌日志；日常盯盘以任务为主（训练监控次要入口见 #217）
+- 关于 / 首页 / Fast 页补充开源致谢与 NOTICE 引用
+
+### 依赖
+
+- 钉死 `protobuf==3.20.3`，避免 Flux/SD3 sentencepiece 落到 3.19.x
+
+### 整合包
+
+- **lite**（GitHub）：不含 Fast 运行时，内置 WD 打标模型，压缩包目标 &lt; 2 GB
+- **full**（网盘）：预装 Anima Fast `.venv` + 同上打标模型
+- 文件名：`Next-Trainer-v2.9.2-beta.1-lite.7z` / `-full.7z`（发布时已从旧前缀 `SD-Trainer-` 更名）
+
+### 说明
+
+- 已知与秋叶旧导航不同；习惯对齐专项在 `dev` 内测后再开
+
+---
+## v2.9.1 — 2026-07-28
+
+### 紧急修复
+
+- 修复 v2.9.0 共享训练页面把提交提示句柄声明为 `const` 后再次赋值，导致点击“开始训练”时在请求 `/api/run` 前崩溃的问题（#206）。
+- 增加真实 JavaScript 执行回归测试，并验证 SDXL、Anima 与 Flux 页面均能发出训练请求。
+- 更新前端缓存键，确保浏览器不会继续加载 v2.9.0 的破损 bundle。
+
+### 发布说明
+
+- v2.9.0 整合包已撤回；请勿继续使用该版本发起训练。
+- 本版保留 v2.9.0 的 Anima Fast、LoKr、本地打标和 Windows 整合包修复。
+
+---
+## v2.9.0 — 2026-07-22
+
+### Anima Fast
+
+- 高于 1024 的训练分辨率会自动计算 `max_bucket_reso`，并开放最小/最大桶分辨率、桶步长与禁止放大选项（#196）。
+- 用户手动填写的最大桶分辨率过小时，在训练启动前给出明确提示；非桶步长倍数会自动向上调整。
+- Windows 安装 Fast 插件时，uv 默认使用系统证书库；`UnknownIssuer` 会显示代理、杀毒软件和旧版 uv 排障提示（#195）。
+
+### LoKr 配置
+
+- 修复 Anima 标准模式 LoKr 参数预览与下载配置中出现 `conv_dim=undefined` 等无效值的问题（#186）。
+- 清理逻辑仅在 Anima 标准模式页加载，支持 SPA 跳转，不修改共享前端主 bundle。
+
+### 本地打标
+
+- `wd-vit-v3`、`wd14-moat-v2` 优先使用本地模型目录，不再在本地文件齐全时访问 Hugging Face（#194）。
+- 兼容旧目录名称，并支持直接使用完整的 Hugging Face 本地缓存。
+
+### Windows 整合包
+
+- 用户数据以 `SD-Trainer/sd-models`、`output`、`logs`、`train` 为实际目录，整合包根目录保留兼容 junction。
+- 启动时自动迁移旧版反向 junction；整合包移动到新路径后会修复失效 junction，并保留已有数据。
+- 生成 7z 时不再跟随数据目录 junction，避免离线打标模型被重复打包。
+
+### 文档
+
+- 新增面向 SDXL 用户的 Anima LoRA 参数迁移说明（#193）。
+
+---
+## v2.8.35 — 2026-06-28
+
+### 整合包（更新脚本 hotfix + 版本号）
+
+相对 v2.8.3 整合包 7z，本版 **`VERSION` / UI 芯片为 v2.8.35**，便于区分已含更新脚本修复的构建；**无前端 layout/app bundle 变更**。
+
+- **`Update-SD-Trainer.bat` / `Update-SD-Trainer-Release.bat`**：路径引号、`CRLF`、PowerShell 5.1 UTF-8 BOM（`UPDATER_VERSION` 4）
+- 新增 **`Fix-Portable-Bats.bat`**
+- 仍含 v2.8.3 后端/Hub/junction 等更新；SPA 仍为稳定 dist（`20260627-config-import`）
+
+---
+## v2.8.3 — 2026-06-28
+
+### 后端与整合包（无前端 layout 变更）
+
+相对 v2.8.2，本版 **仅版本号与后端/便携逻辑** 更新；**未** 重新合入会破坏表单挂载的 LoKr 前端 dist patch（#189 已回滚）。
+
+#### 整合包：更新脚本 hotfix（同 VERSION 重发）
+
+- **`Update-SD-Trainer.bat` / `Update-SD-Trainer-Release.bat`**：修复 `%PORTABLE_ROOT%` 尾部 `\` 导致 PowerShell `Illegal characters in path`。
+- **`.bat` CRLF**：打包与 Release 合并时强制 Windows 换行；新增 **`Fix-Portable-Bats.bat`** 修复 LF-only / UTF-8 BOM 问题。
+- **`.ps1` UTF-8 BOM**：兼容 Windows PowerShell 5.1 解析中文；bootstrap 在本地 **`UPDATER_VERSION`** 更高时不再被 GitHub main 旧脚本覆盖。
+- **`update_from_release.ps1`**：合并 Release 后自动修复根目录 `.bat` 换行。
+
+#### LoKr / 配置导出（#186，API only）
+
+- 新增 **`POST /api/config/normalize-for-export`**，供后续前端或脚本统一导出规范化。
+- 导入时跳过 `undefined` / `null` 等无效 LyCORIS 标量。
+
+#### 整合包：打标与 Hub（#188）
+
+- **`MIKAZUKI_HUB_BACKEND=auto`**；`SmilingWolf/*` 等非魔搭模型直链 Hugging Face。
+- 打标下载终端进度与中文错误提示。
+
+#### 整合包：内置文件选择器（#191）
+
+- 启动/打包时将外层 `sd-models`、`output`、`logs`、`train`、`tagger-models` 联接进 `SD-Trainer/`。
+
+### 说明
+
+- UI 版本芯片显示 **v2.8.3**；SPA 业务 bundle 仍为 **v2.8.2 稳定 dist**（`20260627-config-import`）。
+- LoKr 下载/预览走 API 的前端 patch 待单独 PR 验证后再发。
+
+---
+## v2.8.2 — 2026-06-27
+
+### 整合包更新要点
+
+面向 Windows 便携整合包 **SD-Trainer-v2.8.2.7z**（`PORTABLE_BUILD` **`2874ad1`**，约 **392 MB**）。相对 v2.7.0 / 旧版整合包，本版重点修复下列训练与 WebUI 路径：
+
+#### SDXL 训练修复
+
+- 修正 WebUI **`sdxl-lora`** 路由，对接当前 vendored SDXL 训练脚本栈（#146，自 v2.8.0 起）。
+- 训练子进程启动允许使用 user-site 的 `torch` / `accelerate`，避免整合包环境下误报「训练接口网络请求失败」（#164）。
+- 整合包预置 **`tokenizer-cache/`**（CLIP / T5 等），SDXL / Flux 离线训练不再依赖首次联网拉 tokenizer。
+
+#### 打标修复
+
+- 默认 WD 打标模型 **wd14-convnextv2-v2** 随包预置于 **`tagger-models/wd14/`**，「数据集打标」开箱即用。
+- 打标加载增加 ONNX Runtime 诊断、CUDA 失败 CPU 回退与超时保护，避免无限 loading（v2.8.0）。
+- 经典 / 原生标签编辑器空页渲染与侧栏入口修正（#165 等）。
+
+#### 预览图修复
+
+- 旧 autosave / 导入 TOML 缺少 **`enable_preview`** 时，前后端自动推断并保留 `sample_prompts` 等预览字段（#179、#166）。
+- Anima Fast 开启预览后 **`sample_at_first`** 默认 true，确保至少出一张样图（#160）。
+- Fast 环境安装完成后 **自动刷新页面**，安装进度区不再长期遮挡右侧参数预览（#180）。
+
+#### 训练配置导入修复
+
+- 配置文件 **全量替换导入** 时保留数值类型（整数 / 浮点不再被误转成字符串）（#171）。
+- 导入校验补全 **`anima-lora`** 页规格，并与当前 schema 对齐（#179）。
+- 前端参数预览 / 下载 TOML 序列化修复：union 分支字段回填、`network_args` 安全展开（#179）。
+
+### 整合包说明
+
+- 下载：**[Releases → SD-Trainer-v2.8.2.7z](https://github.com/wochenlong/lora-scripts-next/releases/tag/v2.8.2)**，解压后双击 **`run_gui.bat`**。
+- **Anima Fast** 仍不预装插件 venv；首次在 Fast 页内安装。安装成功后会自动刷新以显示完整参数区。
+- 已装旧版整合包：推荐 **`Update-SD-Trainer-Release.bat`** 合并最新 Release；Git 更新用 **`Update-SD-Trainer.bat`**。
+- 用户向补充说明（打标目录、命令行训练、升级）：[`docs/portable-getting-started.md`](docs/portable-getting-started.md)
+
+### 发版前验证（已通过）
+
+- 默认 WD 打标、SDXL LoRA 冒烟训练、Anima Fast 安装 + 训练、旧 autosave TOML 导入后参数预览与下载配置。
+
+---
+## v2.8.1 - 2026-06-25
+
+### Release blockers
+
+- **Standard LoRA launch**: allow user-site `torch` / `accelerate` when source installs need them, avoiding training subprocess startup failures that surfaced as “training endpoint network request” errors.
+- **Anima Fast preview**: infer preview enablement from strict prompt or sampling-interval signals when `enable_preview` is dropped or falsified by schema serialization; keep `sample_at_first` defaulting to true for enabled previews.
+- **LoKr bf16 guardrails**: disable known-problematic LoKr bf16 weight-decomposition paths and avoid full-half precision for `full_matrix` adapters to work around upstream LyCORIS dtype issues.
+- **Native tag editor**: keep the experimental native editor route available for direct testing, but hide it from the default sidebar until it is hardened; fix its empty-page render path.
+
+### Packaging notes
+
+- Build the 2.8.1 portable package only from a clean `origin/main` including PRs #160, #163, #164, #165, and #166.
+- Pre-release validation must include: standard LoRA launch from the portable Python environment, Anima Fast preview prompt/TOML generation, default legacy tag editor entry, and hidden native editor sidebar entry.
+
+---
+## v2.8.0 - 2026-06-19
+
+### Release blockers
+
+- **Tagger startup**: hardened local WD14 ONNX loading with model-size checks, ONNX Runtime provider diagnostics, CPU fallback, and a bounded load timeout so a bad CUDA/session init no longer leaves users at an endless loading state.
+- **Legacy tag editor**: restored the legacy Gradio Dataset Tag Editor as a default startup path for existing users while keeping `--disable-tageditor` as the opt-out switch.
+- **SDXL LoRA training**: fixed the WebUI/API `sdxl-lora` route to use the vendored SDXL trainer path that matches the current sd-scripts strategy stack. Verified through `/api/run` -> `process.run_train()` -> TaskManager -> accelerate -> `vendor/sd-scripts/sdxl_train_network.py`, completing a 20-step SDXL smoke run and writing a LoRA `.safetensors` artifact.
+
+### Packaging notes
+
+- Build the 2.8.0 portable package only from a clean `origin/main` that includes the SDXL route fix from #146.
+- Pre-release validation must include: default WD14 tagging from bundled `tagger-models/`, legacy `/tageditor.md` + `/proxy/tageditor/`, and a real SDXL LoRA smoke training run that reaches training steps and saves a model.
+
+---
+
+## v2.7.1 — 2026-06-14
+
+### Bug 修复（前端 dist）
+
+- **#121** 侧栏中英文切换不再丢失：语言选择由 `sessionStorage` 改存 `localStorage`，关闭重开浏览器后保持；启动时一次性迁移旧 `sessionStorage` 值并清理，检测逻辑改为纯读取无副作用。
+- **#121** 英文模式下底部主题按钮残留中文「灯泡」：新增 `灯泡 → Theme` 映射，将 `.sidebar-bottom` 纳入文本替换范围，并翻译主题按钮 `title`（`toggle color mode`）提示。
+
+### 资源版本
+
+- `sd-nav-i18n.js` / `sd-trainer-brand.js` 的 cache 查询参数随 `VERSION` 统一为 `?v=2.7.1`（由 `scripts/patch-ui-brand-version.py` 生成），确保旧缓存的客户端加载到修复后的脚本。
 
 ---
 

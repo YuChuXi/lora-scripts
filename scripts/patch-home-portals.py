@@ -8,6 +8,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from spa_asset_cache import SPA_ASSET_CACHE_KEY
+
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "frontend/dist"
 ASSETS = DIST / "assets"
@@ -28,8 +34,20 @@ BADGES = """<p class="sd-home-badges" align="center"><a href="https://github.com
 
 HOME_HUB_HTML = f"""<div class="sd-home-hub">{BADGES}<p class="sd-home-lead"><strong>lora-scripts-next</strong>（Next Trainer）是基于秋叶 <a href="https://github.com/Akegarasu/lora-scripts" target="_blank" rel="noopener noreferrer">lora-scripts</a> 的<strong>下一代</strong> Stable Diffusion 训练 WebUI：在浏览器里配参数、一键开训。</p><h2 class="sd-home-section-title">LoRA 训练</h2><div class="sd-home-portals"><a class="sd-home-portal sd-home-portal--primary" href="/lora/sd3.html"><span class="sd-home-portal__title">Anima LoRA</span><span class="sd-home-portal__desc">DiT · 主推</span></a><a class="sd-home-portal" href="/lora/anima-fast.html"><span class="sd-home-portal__title">Anima Fast</span><span class="sd-home-portal__desc">插件加速 · 进阶</span></a><a class="sd-home-portal" href="/lora/flux.html"><span class="sd-home-portal__title">Flux</span><span class="sd-home-portal__desc">Flux LoRA</span></a><a class="sd-home-portal" href="/lora/master.html"><span class="sd-home-portal__title">Stable Diffusion</span><span class="sd-home-portal__desc">SD1.5 / SDXL LoRA</span></a></div><h2 class="sd-home-section-title">全量微调</h2><div class="sd-home-portals"><a class="sd-home-portal" href="/lora/anima-finetune.html"><span class="sd-home-portal__title">Anima Finetune</span><span class="sd-home-portal__desc">DiT full finetune · 高显存</span></a><a class="sd-home-portal" href="/dreambooth/index.html"><span class="sd-home-portal__title">Stable Diffusion</span><span class="sd-home-portal__desc">SDXL Finetune · Dreambooth</span></a></div><h2 class="sd-home-section-title">训练监控</h2><div class="sd-home-portals sd-home-portals--single"><a class="sd-home-portal sd-home-portal--monitor" href="{MONITOR_URL}" target="_blank" rel="noopener noreferrer"><span class="sd-home-portal__title">训练监控</span><span class="sd-home-portal__desc">{MONITOR_DESC}</span></a></div><p class="sd-home-foot">详细步骤见 <a href="/help/guide.html">帮助 → 新手上路</a>；秋叶用户迁移说明也在该页。参数释义 · <a href="/lora/params.html">训练参数说明</a> · <a href="/other/changelog.html">更新日志</a></p></div>"""
 
-# Keep in sync with scripts/patch-brand-illustrations.py GUIDE_BODY
-GUIDE_HTML_BODY = """<div class="sd-guide"><div class="sd-guide-intro"><div class="sd-guide-intro__art" aria-hidden="true"><img src="/assets/guide-mascot.webp?v=20260525-nt5" alt="" loading="lazy" decoding="async"></div><div class="sd-guide-intro__body"><h2 id="新手上路" tabindex="-1"><a class="header-anchor" href="#新手上路" aria-hidden="true">#</a> 新手上路</h2><ol><li><strong>准备数据</strong>：训练图片 + 同名 <code>.txt</code> 标签；可用「工具与调试 → 数据集打标」。</li><li><strong>选择训练类型</strong>（侧栏「训练」）：<ul><li><strong>LoRA 训练</strong><ul><li><a href="/lora/sd3.html">Anima LoRA</a> — Anima DiT（推荐）</li><li><a href="/lora/anima-fast.html">Anima Fast</a> — 可选插件加速（进阶，页内安装）</li><li><a href="/lora/flux.html">Flux</a></li><li><a href="/lora/master.html">Stable Diffusion</a> — SD1.5 / SDXL LoRA</li></ul></li><li><strong>全量微调</strong><ul><li><a href="/lora/anima-finetune.html">Anima Finetune</a> — DiT 整模微调（高显存）</li><li><a href="/dreambooth/index.html">Stable Diffusion</a> — 默认 SDXL Finetune，可切换 SD1.5 Dreambooth</li></ul></li></ul></li><li><strong>填写参数并开训</strong>：中栏表单 → 右栏「开始训练」。</li><li><strong>查看进度</strong>：<a href="/train-monitor" target="_blank" rel="noopener noreferrer">训练监控</a>、<a href="/tensorboard.html">Tensorboard</a>。</li></ol></div></div><section class="sd-guide-migrate"><h2 id="从秋叶版迁移" tabindex="-1"><a class="header-anchor" href="#从秋叶版迁移" aria-hidden="true">#</a> 从秋叶版迁移</h2><p>若你使用过 <strong>Akegarasu/lora-scripts</strong>（秋叶一键包），本版主要变化：</p><ul><li><strong>品牌</strong>：项目名 <strong>lora-scripts-next</strong> / Next Trainer，侧栏按「训练 / 工具 / 帮助 / 其他」分组。</li><li><strong>导航</strong>：LoRA 与全量微调分栏；原「新手 / 专家」不再平铺（SD1.5 精简页：<a href="/lora/basic.html">/lora/basic.html</a>）。</li><li><strong>Anima</strong>：LoRA 与 Finetune 分入口（Qwen + T5 + DiT）。</li><li><strong>监控</strong>：独立 <a href="/train-monitor" target="_blank" rel="noopener noreferrer">训练监控页</a>、Loss 曲线、<code>/train-log</code> 日志流。</li><li>更多版本说明见 <a href="/other/changelog.html">更新日志</a>。</li></ul></section></div>"""
+# Guide body is built by scripts/patch-anima-fast-entry.py (pager layout).
+def guide_html_body() -> str:
+    import importlib.util
+
+    script = ROOT / "scripts" / "patch-anima-fast-entry.py"
+    spec = importlib.util.spec_from_file_location("_anima_fast_patch", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load patch-anima-fast-entry.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.build_full_guide_pager_html(compact=True)
+
+
+GUIDE_APP_IMPORT = f"./app.547295de.js?v={SPA_ASSET_CACHE_KEY}"
 
 
 def patch_index_js() -> None:
@@ -96,11 +114,15 @@ def write_guide_assets() -> None:
         f"const t=JSON.parse({json.dumps(json.dumps(data, ensure_ascii=False))});export{{t as data}};",
         encoding="utf-8",
     )
-    inner = GUIDE_HTML_BODY.replace("\\", "\\\\").replace("`", "\\`")
+    body = guide_html_body()
+    inner = body.replace("\\", "\\\\").replace("`", "\\`")
+    app_import = GUIDE_APP_IMPORT
     GUIDE_COMP_JS.write_text(
-        'import{_ as n,o as s,c as a,e as i}from"./app.547295de.js";'
-        f"const _={{}},h=i(`{inner}`);"
-        "function u(){return s(),a(\"div\",null,[h])}"
+        f'import{{_ as n,o as s,c as a,a as e,e as i}}from"{app_import}";'
+        "const _={},h=i(`"
+        + inner
+        + "`);"
+        'function u(){return s(),a("div",null,[e("span",{"aria-hidden":"true",style:"display:none"},".",-1),h])}'
         'var x=n(_,[["render",u],["__file","guide.html.vue"]]);export{x as default};',
         encoding="utf-8",
     )
@@ -108,12 +130,14 @@ def write_guide_assets() -> None:
     tpl = (DIST / "other/changelog.html").read_text(encoding="utf-8")
     g = tpl.replace("/other/changelog.md", "/help/guide.md")
     g = g.replace("更新日志", "新手上路", 2)
+    g = g.replace("changelog.html.a1b2c3d4.js", "guide.html.b8e2d701.js")
+    g = g.replace("changelog.html.e5f6a7b8.js", "guide.html.c3f4a902.js")
     g = g.replace("changelog.html", "guide.html")
-    g = g.replace("changelog.html.a1b2c3d4", "guide.html.b8e2d701")
-    g = g.replace("changelog.html.e5f6a7b8", "guide.html.c3f4a902")
-    a = g.find("<h2 id=")
+    a = g.find('<div class="sd-guide')
+    if a < 0:
+        a = g.find("<h2 id=")
     b = g.find("</div><!--[--><!--]--></div><footer")
-    g = g[:a] + GUIDE_HTML_BODY + g[b:]
+    g = g[:a] + body + g[b:]
     g = g.replace("<title>更新日志 | SD 训练 UI</title>", "<title>新手上路 | SD 训练 UI</title>")
     GUIDE_HTML.write_text(g, encoding="utf-8")
     print("wrote help/guide")

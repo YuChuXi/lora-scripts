@@ -32,8 +32,9 @@ available_interrogators = {
         repo_id='SmilingWolf/wd-swinv2-tagger-v3',
     ),
     'wd-vit-v3': WaifuDiffusionInterrogator(
-        'wd14-vit-v3',
+        'wd-vit-v3',
         repo_id='SmilingWolf/wd-vit-tagger-v3',
+        local_model_aliases=('wd14-vit-v3',),
     ),
     'wd14-convnextv2-v2': WaifuDiffusionInterrogator(
         'wd14-convnextv2-v2', repo_id='SmilingWolf/wd-v1-4-convnextv2-tagger-v2',
@@ -48,9 +49,10 @@ available_interrogators = {
         revision='v2.0'
     ),
     'wd14-moat-v2': WaifuDiffusionInterrogator(
-        'wd-v1-4-moat-tagger-v2',
+        'wd14-moat-v2',
         repo_id='SmilingWolf/wd-v1-4-moat-tagger-v2',
-        revision='v2.0'
+        revision='v2.0',
+        local_model_aliases=('wd-v1-4-moat-tagger-v2',),
     ),
     'wd-eva02-large-tagger-v3': WaifuDiffusionInterrogator(
         'wd-eva02-large-tagger-v3',

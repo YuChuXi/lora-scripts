@@ -34,7 +34,7 @@ class TrainRoutingTests(unittest.TestCase):
         mapping = load_trainer_mapping()
 
         self.assertEqual(mapping["sd-lora"], "./scripts/stable/train_network.py")
-        self.assertEqual(mapping["sdxl-lora"], "./scripts/stable/sdxl_train_network.py")
+        self.assertEqual(mapping["sdxl-lora"], "./vendor/sd-scripts/sdxl_train_network.py")
 
 
 if __name__ == "__main__":

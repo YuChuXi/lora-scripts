@@ -63,6 +63,7 @@ TENSORBOARD_SCALAR_TAGS = (
     "lr/llm_adapter",
 )
 TENSORBOARD_LOSS_LIMIT = 10000
+TENSORBOARD_LR_TAG_PREFIXES = ("lr/",)
 
 STRONG_ERROR_PATTERNS = [
     r"\btraceback\b",
@@ -396,13 +397,13 @@ def tensorboard_loss_scalars(limit: int = TENSORBOARD_LOSS_LIMIT) -> list[dict]:
             continue
 
         series = []
-        for tag in TENSORBOARD_SCALAR_TAGS:
-            if tag not in scalar_tags:
-                continue
+        run_label = str(run_dir.relative_to(REPO)) if run_dir.is_relative_to(REPO) else str(run_dir)
+
+        def scalar_series(tag: str) -> dict | None:
             try:
                 events = accumulator.Scalars(tag)[-limit:]
             except Exception:
-                continue
+                return None
             points = [
                 {
                     "step": int(event.step),
@@ -411,17 +412,33 @@ def tensorboard_loss_scalars(limit: int = TENSORBOARD_LOSS_LIMIT) -> list[dict]:
                 for event in events
             ]
             if not points:
-                continue
+                return None
             values = [point["value"] for point in points]
-            series.append({
+            return {
                 "tag": tag,
                 "name": tag.split("/", 1)[-1].replace("_", " "),
                 "points": points,
                 "latest": values[-1],
                 "min": min(values),
                 "max": max(values),
-                "run": str(run_dir.relative_to(REPO)) if run_dir.is_relative_to(REPO) else str(run_dir),
-            })
+                "run": run_label,
+            }
+
+        for tag in TENSORBOARD_SCALAR_TAGS:
+            if tag not in scalar_tags:
+                continue
+            item = scalar_series(tag)
+            if item:
+                series.append(item)
+
+        for tag in sorted(scalar_tags):
+            if tag != "lr" and not any(tag.startswith(prefix) for prefix in TENSORBOARD_LR_TAG_PREFIXES):
+                continue
+            if any(item["tag"] == tag for item in series):
+                continue
+            item = scalar_series(tag)
+            if item:
+                series.append(item)
         if series:
             return series
 

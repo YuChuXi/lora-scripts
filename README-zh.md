@@ -1,297 +1,376 @@
-<p align="center">
-  <img src="assets/readme/next-trainer-cover.png" alt="Next Trainer" width="880" />
-</p>
-
-<h1 align="center">Next Trainer</h1>
+﻿# Next Trainer
 
 <p align="center">
-  <b>Windows 一键 LoRA / 全量微调训练工具</b> — 支持 <b>Anima</b> / SD 1.5 / SDXL / Flux<br/>
-  解压即用，无需配环境。Anima LoRA 约 12GB 显存即可起步；<b>Anima 全量微调建议 24GB 级显存</b>。<br/>
-  <sub>基于 <a href="https://github.com/kohya-ss/sd-scripts">kohya-ss/sd-scripts</a>，秋叶系 GUI 体验。</sub>
+  <img src="assets/readme/next-trainer-cover.png" alt="Next Trainer" width="720" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/wochenlong/lora-scripts-next/releases"><img src="https://img.shields.io/github/v/release/wochenlong/lora-scripts-next?include_prereleases&style=for-the-badge&color=a78bfa&label=%E4%B8%8B%E8%BD%BD%E6%95%B4%E5%90%88%E5%8C%85" alt="下载整合包"/></a>
+  <strong>面向未来与 Agent 的本地训练器</strong><br />
+  熟悉上手 · 一个训练器覆盖常见模型 · 持续更新<br />
+  <sub>专业玩家与平台可用 · 未来支持 Agent 接入 · 仓库 <code>lora-scripts-next</code></sub>
 </p>
 
 <p align="center">
-  <a href="https://github.com/wochenlong/lora-scripts-next"><img src="https://img.shields.io/github/stars/wochenlong/lora-scripts-next?style=flat-square&label=stars&logo=github&color=8b5cf6" alt="stars"/></a>
-  <a href="https://github.com/wochenlong/lora-scripts-next/blob/main/LICENSE"><img src="https://img.shields.io/github/license/wochenlong/lora-scripts-next?style=flat-square&color=ec4899" alt="license"/></a>
-</p>
-<p align="center">
-  <a href="https://github.com/wochenlong/lora-scripts-next/blob/main/README.md"><b>English (README)</b></a>
-</p>
-<p align="center">
-  <a href="https://github.com/wochenlong/lora-scripts-next/blob/main/NOTICE.md"><b>致谢 & 许可</b></a>
-</p>
-<p align="center">
-  <a href="https://github.com/wochenlong/lora-scripts-next/tree/anima-edit"><b>实验分支：Anima Edit</b></a>
+  <a href="README.md">English</a>
+  ·
+  <a href="#计划中roadmap">计划中</a>
+  ·
+  <a href="docs/credits.md">开源引用</a>
+  ·
+  <a href="CHANGELOG.md">更新日志</a>
+  ·
+  <a href="https://github.com/wochenlong/lora-scripts-next/releases">Releases</a>
 </p>
 
 ---
 
-<p align="center">
-  <img src="assets/readme/screenshot-webui.png?v=20260528" alt="Next Trainer 首页" width="920" />
-</p>
+## 这是什么
 
-<p align="center"><sub>首页传送门 — 训练、监控与新手上路快捷入口</sub></p>
+**Next Trainer** 是一款**面向未来与 Agent 的本地训练器**：  
+界面仍然熟悉，解压就能上手；能力上却按专业工作台来设计——**一个训练器覆盖大部分常见模型**，并持续跟上新模型与新引擎。
+
+对人来说，它是本地训练器：打标、开训、盯任务、换引擎，都在同一套专业 UI 里完成。Windows 与 Linux 都能用。  
+对平台和 Agent 来说，目标是做成可拆开的模块：可以整包使用，也**计划**支持在自动化流程里接入训练这一环。
+
+你仍在本机 NVIDIA 显卡上训 LoRA 或全量微调。  
+底层站在成熟训练栈上：主路径基于 [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts)；训 Krea 2 时可按需接入 [musubi-tuner](https://github.com/kohya-ss/musubi-tuner)。  
+对外品牌名是 **Next Trainer**，发布包一般是 `Next-Trainer-v*.7z`。当前默认是 Vue 3 工作台 **3.0.0**，分成训练、数据集、任务、设置四块。
 
 ---
 
-## 三步开始训练
+## 能做什么
 
-```
-1. 下载  →  从 [Releases](https://github.com/wochenlong/lora-scripts-next/releases) 下载 **SD-Trainer-v2.7.0.7z**，解压
-2. 启动  →  双击 run_gui.bat（首次自动安装依赖 ~3 GB）
-3. 训练  →  浏览器打开 http://127.0.0.1:28000，选模型、填参数、开练
-```
+一句话：从打标、改标签，到选模型开训、盯进度、看日志，尽量在同一个本地训练器里完成。
 
-整合包已内置默认 WD 打标模型 **wd14-convnextv2-v2**（约 400 MB，位于 **`tagger-models/wd14/`**），WebUI「数据集打标」页开箱即用。在线下载失败时，可手动把 `model.onnx` 与 `selected_tags.csv` 放进该目录，详见 [`docs/tagger-models.md`](docs/tagger-models.md)。
+覆盖这些常见训练路线：
 
-> **纯命令行 / 云平台训练：** `train.sh` 是旧式 SD/SDXL/Flux 入口。Anima 请用专用脚本：
-> `bash train_anima_by_toml.sh docs/examples/anima-lora-benchmark-kohya.toml`（标准模式，非 Fast）或
-> `bash train_anima_fast_by_toml.sh docs/examples/anima-lora-benchmark-fast.toml`（Fast 插件；先运行 `bash scripts/cli/install_anima_fast.sh`）。
+1. Anima LoRA  
+2. Anima Fast  
+3. Anima 全量微调  
+4. SD 1.5、SDXL、Flux  
+5. 可选的 Krea 2
 
-> **要求：** Windows 10/11，NVIDIA 显卡（RTX 20+），~7 GB 磁盘。
+也带本地打标、训练监控页，以及 TensorBoard。
+
+### 相比其它训练器，为什么值得试
+
+如果别的工具让你在「熟悉」和「先进」里二选一，Next Trainer 想两边都要。
+
+1. **UI：熟悉，能一键上手**  
+   路径刻意保留对 Akegarasu / SD-Trainer 用户熟悉的操作习惯（并向 Akegarasu 致谢，见 [开源引用](docs/credits.md)）。整合包解压即用；选模型、填参数、导入 TOML、开训、看预览，不用为了换壳重新学一遍。
+
+2. **能力：专业，一个训练器训常见模型**  
+   Anima、SD 1.5、SDXL、Flux，以及可选的 Krea 2，收进同一套工作台。Kohya 是基线，Anima Fast、Musubi 等引擎按需安装与切换。
+
+3. **节奏：及时更新**  
+   新模型和常用训练路径会持续跟进，而不是停在某一版脚本外壳上。个人跟整合包，开发者和平台可跟 `main` / `dev`。
+
+4. **代码：模块化，未来支持 Agent 接入**  
+   设计目标不是只能点网页。模块可拆、配置可导入导出、任务与日志可被程序读取。人可以走完整 UI；后续也会让 Agent 或平台只接入训练这一环，嵌进自己的流水线。
+
+5. **过程：任务看得见**  
+   状态、日志、预览和 Loss 收在任务页。训起来之后，盯盘不必再开一堆外部窗口。
+
+它不是云端一键平台，也不假装替代所有专用工具。  
+它要成为：面向未来与 Agent、对常见模型够全、又能持续更新的本地训练器。
+
+---
+
+## 有什么功能
+
+### 训练
+
+1. 选基础模型  
+2. 选训练引擎  
+3. 选训练目标  
+4. 右侧看 TOML 预览  
+5. 可以校验、导入导出，然后开始训练
+
+### 数据集
+
+1. 用 WD14 做模型打标  
+2. 用标签编辑器改标签，界面以图片为主  
+3. 筛选和批量操作在右侧面板
+
+### 任务
+
+看任务列表、状态、日志、预览图和 Loss。日常盯训练主要看这一页。
+
+### 设置
+
+1. 主题和界面偏好  
+2. 训练引擎管理  
+3. 下载源镜像  
+4. 关于页和更新日志
+
+### 各模式大概要多少显存
+
+1. **Anima LoRA**  
+   支持 LoRA、LoKr、T-LoRA。大约 12GB 起。
+
+2. **Anima Fast**  
+   可选独立运行时。建议 16GB 及以上。在设置页安装。
+
+3. **Anima 全量**  
+   完整 DiT。建议大约 24GB。
+
+4. **SD 1.5 和 SDXL**  
+   支持 LoRA 和全量微调。
+
+5. **Flux**  
+   支持 LoRA。
+
+6. **Krea 2**  
+   经 Musubi 训 LoRA。推荐直接下 **musubi** 整合包，或在 kohya/lite 包的设置页安装 Musubi。Linux 可以多卡。
+
+更细的显存和参数说明见 [Anima 训练文档](docs/anima-training.md)。
+
+相关文档：
+
+1. [Anima Fast 说明](docs/anima-fast.md)  
+2. [Krea 2 多卡说明](docs/krea2-linux-multigpu.md)
+
+### 界面长什么样
+
+下面截图来自 Vue 3，中文界面。
+
+<details open>
+<summary><strong>训练</strong></summary>
+
+| Kohya 或 Anima 标准 | Anima Fast | Krea 2 |
+|---|---|---|
+| ![训练标准](assets/readme/vue3/01-training-standard.png) | ![训练 Fast](assets/readme/vue3/02-training-fast.png) | ![训练 Krea 2](assets/readme/vue3/08-training-krea2.png) |
+
+</details>
 
 <details>
-<summary><b>从源码安装（Linux / 高级用户）</b></summary>
+<summary><strong>数据集</strong></summary>
 
-```sh
+| 模型打标 | 标签编辑 |
+|---|---|
+| ![打标](assets/readme/vue3/03-dataset-tagger.png) | ![标签编辑](assets/readme/vue3/04-dataset-editor.png) |
+
+</details>
+
+<details>
+<summary><strong>任务</strong></summary>
+
+![任务](assets/readme/vue3/05-tasks.png)
+
+</details>
+
+<details>
+<summary><strong>设置</strong></summary>
+
+| 界面偏好 | 训练引擎 |
+|---|---|
+| ![设置界面](assets/readme/vue3/07-settings-ui.png) | ![设置引擎](assets/readme/vue3/06-settings-engines.png) |
+
+</details>
+
+---
+
+## 计划中（Roadmap）
+
+下面是公开路线图，**不保证排期**；具体进度以 [Issues](https://github.com/wochenlong/lora-scripts-next/issues) 为准。欢迎催更或补充场景。
+
+### 引擎与能力
+
+- [ ] 接入 [AI Toolkit](https://github.com/ostris/ai-toolkit)（更多新模型训练路径）
+- [ ] 接入 [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio)（文生图 LoRA 等）
+- [ ] 支持**图像编辑**类模型训练
+- [ ] 支持**视频**类模型训练
+
+### 模型与数据
+
+- [ ] **模型管理器**：按底模族默认推荐、本机优先、远程 ID 一键拉取到引擎原生布局
+- [ ] **API 打标**（对接外部打标 / 多模态接口）
+- [ ] **自然语言打标**（用自然语言描述生成 / 改写 caption）
+
+### 自动化
+
+- [ ] **Agent / API 接入**：把训练、任务状态做成可被程序调用的一环（模块化目标的一部分）
+
+---
+
+## 下载、安装与其它说明
+
+### 下载整合包
+
+**正式版 [v3.0.0](https://github.com/wochenlong/lora-scripts-next/releases/tag/v3.0.0)** 已发布（Vue 3 工作台）。国内用户优先走魔搭。
+
+| 包 | 预装 | 适合 | 大约体积 | 下载 |
+|----|------|------|----------|------|
+| **kohya**（默认） | Kohya（cu128） | Anima / SD / SDXL / Flux | ~2.5 GB（分两卷） | [GitHub](https://github.com/wochenlong/lora-scripts-next/releases/tag/v3.0.0) · [魔搭](https://www.modelscope.cn/datasets/Next-Lab/next-trainer-releases) |
+| **musubi** | Musubi | **Krea 2** LoRA | ~2.2 GB | **[魔搭](https://www.modelscope.cn/datasets/Next-Lab/next-trainer-releases)**（`releases/v3.0.0/Next-Trainer-v3.0.0-musubi.7z`） |
+| **lite** | 几乎无训练环境 | 自备依赖 / 源码党 | ~0.4 GB | GitHub · 魔搭 |
+
+- Kohya 分卷：`Next-Trainer-v3.0.0-kohya.7z.001` + `.002`，**两卷放同一目录**用 7-Zip 解压。  
+- 魔搭数据集：[`Next-Lab/next-trainer-releases`](https://www.modelscope.cn/datasets/Next-Lab/next-trainer-releases)，路径 `releases/v3.0.0/`。  
+- 训练底模与 Anima Fast **不预装**（Fast 在设置页安装）。Krea 2 步骤见 [Krea 2 上手](docs/portable-1.5-krea2-guide.md)。  
+- 仍想用旧界面：下 [v2.9.1](https://github.com/wochenlong/lora-scripts-next/releases/tag/v2.9.1)。
+
+运行环境：
+
+1. Windows 10 / 11，或 Linux  
+2. NVIDIA 显卡，建议 RTX 20 系列及以上  
+3. 整合包解压路径尽量不要带中文，也不要带空格（主要面向 Windows；Linux 更建议从源码启动）
+
+更多说明：
+
+1. [整合包说明](docs/portable-getting-started.md)  
+2. [打标模型](docs/tagger-models.md)  
+3. [构建与发包](docs/portable-build-guide.md)
+
+### 用整合包启动
+
+1. 解压  
+2. 双击根目录 **`启动.bat`**（或 `run_gui.bat`；以包内说明为准）  
+3. 浏览器打开 http://127.0.0.1:28000  
+4. 侧栏版本应显示 **`v3.0.0`**
+
+### 从源码跑 `main`
+
+```powershell
 git clone https://github.com/wochenlong/lora-scripts-next.git
 cd lora-scripts-next
+git checkout main
+git pull
 
-# Windows
-run_gui.bat
-
-# Linux
-bash install.bash && bash run_gui.sh
-
-# 可选：安装 Flash Attention 2 加速 Anima 训练
-# Windows
-install_flash_attn.bat
-# Linux
-bash install_flash_attn.sh
+.\run_gui.bat
 ```
 
-推荐 Python **3.10**。详见 [Flash Attention 2 文档](docs/flash-attention.md)。
-
-</details>
-
----
-
-## 支持什么
-
-| 模式 | 模型 / 脚本 | 说明 |
-|------|-------------|------|
-| **Anima LoRA** | LoRA · LoKr · **T-LoRA** | Flash Attention 2 / xformers / SDPA · 约 12GB 显存起 |
-| **Anima Edit** | 图像编辑 LoRA（实验） | 目前在 [`anima-edit`](https://github.com/wochenlong/lora-scripts-next/tree/anima-edit) 分支独立维护 |
-| **Anima LoRA Fast** | 仅 LoRA（进阶插件） | 可选 [anima_lora](https://github.com/sorryhyun/anima_lora) 运行时 · 建议 16GB+ · 见 [`docs/anima-fast.md`](docs/anima-fast.md) |
-| **Anima 全量微调** | 完整 DiT（`anima_train.py`） | 侧栏 **全量微调 → Anima Finetune** · **约 24GB 显存**（4090 档） |
-| SD 1.5 / SDXL LoRA | LoRA · LoHa · LoKr | xformers / SDPA |
-| SD 1.5 / SDXL 全量微调 | Dreambooth / SDXL finetune | 侧栏 **全量微调 → Stable Diffusion** |
-| Flux | LoRA | xformers / SDPA |
-
-<p align="center">
-  <img src="assets/readme/screenshot-anima-lora.png?v=20260528" alt="Anima LoRA 训练界面" width="920" />
-</p>
-
-<p align="center"><sub>Anima LoRA — 侧栏导航、中栏模型与数据集表单、右栏配置预览</sub></p>
-
-<p align="center">
-  <img src="assets/readme/screenshot-anima-fast.png?v=20260528" alt="Anima LoRA Fast 模式界面" width="920" />
-</p>
-
-<p align="center"><sub>Anima LoRA Fast — 侧栏「标准模式 / Fast 模式」；页内安装插件后再开训</sub></p>
-
-<p align="center">
-  <img src="assets/readme/screenshot-anima-finetune.png?v=20260528" alt="Anima 全量微调界面" width="920" />
-</p>
-
-<p align="center"><sub>Anima 全量微调 — 侧栏「全量微调 → Anima Finetune」，更新完整 DiT 权重</sub></p>
-
----
-
-## 训练监控
-
-训练启动后自动打开监控页（默认端口 6008，可自动回退），GPU 状态、训练参数、Loss 曲线、预览图、日志一站式查看。
-
-<p align="center">
-  <img src="assets/readme/screenshot-train-monitor.png" alt="训练监控仪表盘" width="920" />
-</p>
-
-<p align="center"><sub>GPU 负载 & 显存、总步数、训练参数一目了然</sub></p>
-
-<p align="center">
-  <img src="assets/readme/train-monitor-samples.png" alt="预览图与 Loss 曲线" width="920" />
-</p>
-
-<p align="center"><sub>训练预览图 + TensorBoard 同源 Loss / LR 曲线</sub></p>
-
-<p align="center">
-  <img src="assets/readme/train-monitor-logs.png" alt="训练日志" width="920" />
-</p>
-
-<p align="center"><sub>实时训练日志，自动滚动</sub></p>
-
----
-
-<details>
-<summary><b>显存参考（Anima，1024 分辨率，RTX 4090 实测）</b></summary>
-
-**Anima LoRA**
-
-| 显存 | 配置 | 备注 |
-|------|------|------|
-| ≥ 24 GB | 默认参数 | 最省心 |
-| ≥ 16 GB | `gradient_checkpointing` | 推荐日常 |
-| ≥ 12 GB | 梯度检查点 | 稳定 |
-| ≥ 10 GB | 梯度检查点 + `blocks_to_swap=16` | 速度略降 |
-| ≥ 8 GB | 梯度检查点 + swap 24 + 缓存 TE + LoKr | 极限 |
-
-**Anima 全量微调**（更新完整 DiT 权重 — 请用 WebUI **Anima Finetune**，不是 LoRA 页）
-
-| 显存 | 配置 | 备注 |
-|------|------|------|
-| ≥ 24 GB | 默认 + latents/TE 缓存 | 实测专用显存约 **23–24 GB**；建议 4090 及以上 |
-
-</details>
-
-<details>
-<summary><b>文档</b></summary>
-
-| 主题 | 链接 |
-|------|------|
-| Anima LoRA 训练指南 | [docs/anima-training.md](docs/anima-training.md) |
-| **Anima Fast 模式（进阶插件）** | [docs/anima-fast.md](docs/anima-fast.md) |
-| 开源归属与 NOTICE | [NOTICE.md](NOTICE.md) |
-| Anima 后端（LoRA + 全量微调） | [docs/anima-backend.md](docs/anima-backend.md) |
-| Anima 全量微调示例 TOML | [docs/examples/anima-full-finetune.toml](docs/examples/anima-full-finetune.toml) |
-| Flash Attention 2 | [docs/flash-attention.md](docs/flash-attention.md) |
-| 训练监控 & SSE 接口 | [docs/train-monitor.md](docs/train-monitor.md) |
-| 打标模型目录（`tagger-models/`） | [docs/tagger-models.md](docs/tagger-models.md) |
-| Docker 部署 | [docs/docker.md](docs/docker.md) |
-| CLI 参数 | [docs/cli-args.md](docs/cli-args.md) |
-
-</details>
-
----
-
-## 仓库目录说明
-
-| 位置 | 用途 |
-|------|------|
-| 根目录 | 仅保留契约入口 + 薄转发器，详见 [docs/repo-layout.md](docs/repo-layout.md) |
-| `scripts/portable/` | 整合包启动逻辑 |
-| `scripts/autodl/` | 云 GPU 运维（根目录同名文件为转发） |
-| `scripts/cli/` | 命令行训练入口（普通 SD/SDXL/Flux、Anima 标准、Anima Fast） |
-| `legacy/` | 打标 / notebook 等，日常可忽略 |
-| `doc/local/` | 本地交接与 Issue 草稿（不上传 GitHub） |
-| `docs/` | 公开文档（含 AutoDL 部署等） |
-
----
-
-## 常见问题
-
-<details>
-<summary><b>无法运行 run_gui.ps1 / 未数字签名</b></summary>
-
-推荐直接双击 `run_gui.bat`。如果一定要运行 `.ps1`：
+也可以用：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\run_gui_source.ps1
+python gui.py --dev
 ```
 
-</details>
-
-<details>
-<summary><b>解压后路径嵌套两层</b></summary>
-
-若路径出现 `...\lora-scripts-next-2.5.0\lora-scripts-next-2.5.0\`，请进入内层含 `run_gui.bat` 的目录。
-
-</details>
-
-<details>
-<summary><b>torch 安装失败 / No matching distribution</b></summary>
-
-**源码安装**（`run_gui.bat` 首次自动装依赖、或手动 `install-cn.ps1`）常见原因：
-
-1. **Python 版本不对** — 需要 **3.10 或 3.11、64 位**。3.12/3.13 没有对应 CUDA 预编译包，pip 会报「找不到匹配版本」。
-2. **仓库太旧** — 若脚本里仍是 `torch 2.0.x + cu118`，请 `git pull` 到最新，或改用 [Releases](https://github.com/wochenlong/lora-scripts-next/releases) 整合包。
-3. **半装坏的 venv** — 删掉项目下的 `venv` 文件夹后重装。
-
-**不想折腾环境**：直接下载最新 **SD-Trainer-v2.7.0.7z** 整合包（或 Releases 页当前最新版），解压双击 `run_gui.bat`（内置 Python，无需自装 torch）。
-
-重装示例（PowerShell，在项目根目录）：
+确认一下版本：
 
 ```powershell
-Remove-Item -Recurse -Force venv -ErrorAction SilentlyContinue
-py -3.10 -m venv venv
-.\venv\Scripts\activate
-powershell -ExecutionPolicy Bypass -File .\install-cn.ps1
+git branch --show-current
+Get-Content VERSION
 ```
 
-</details>
+前端源码在 `frontend/`，技术栈是 Vue 3 和 Vite。
 
-<details>
-<summary><b>打标模型放在哪 / 还要下载吗</b></summary>
+```powershell
+cd frontend
+npm install
+npm run dev
+npm run build
+```
 
-- **默认模型**：`wd14-convnextv2-v2`（HuggingFace：`SmilingWolf/wd-v1-4-convnextv2-tagger-v2`，revision `v2.0`）
-- **推荐路径（优先）**：项目根目录 **`tagger-models/wd14/wd14-convnextv2-v2/`**，需包含 `model.onnx` 与 `selected_tags.csv`
-- **手动放置**：若 WebUI 下载失败，可从 HF / 镜像下载上述两个文件，放入上述目录后重启即可，**无需改 huggingface 缓存**
-- **回退路径**：文件不完整时仍会用 `huggingface/hub/`（`HF_HOME=huggingface`）或在线下载
-- **整合包**：新版 7z 已内置 `tagger-models/`，一般无需再下
-- **源码**：`install-cn.ps1` 或 `python scripts/prefetch_default_tagger.py` 会写入 `tagger-models/`；`run_gui.bat` 启动前也会自动补全
-- **完整说明**：[`docs/tagger-models.md`](docs/tagger-models.md)
+`npm run dev` 需要后端已经启动。  
+`npm run build` 会把产物写到 `frontend/dist`。
 
-</details>
+### 分支怎么选
 
-<details>
-<summary><b>整合包：能开网页但无法开始训练（旧版 v2.5.2 等）</b></summary>
+1. **`main`**  
+   当前默认稳定线。Vue 3 工作台，版本 **3.0.0**。
 
-请升级到 **最新 Release（当前 v2.7.0）**；若你仍在 v2.5.2，可先参考 [`docs/portable-upgrade-2.5.2-to-2.5.3.md`](docs/portable-upgrade-2.5.2-to-2.5.3.md)（[Issue #54](https://github.com/wochenlong/lora-scripts-next/issues/54)），再整包更新到 v2.7.0。
+2. **`dev`**  
+   继续试验新功能的地方。也是 Vue 3，可能比 `main` 更新一点。
 
-</details>
+3. **`legacy/v2.9.1`**  
+   旧界面备份。需要老 UI 时再来这里。
 
-<details>
-<summary><b>整合包更新后打不开 / 启动脚本过时</b></summary>
+跟着试验线：
 
-整合包布局固定为：根目录 `run_gui.bat` + `python_embeded/` + `SD-Trainer/`。
+```powershell
+git fetch origin
+git switch dev
+git pull
+```
 
-- **用 `Update-SD-Trainer.bat` 拉代码后**：脚本会尝试刷新根目录 `run_gui.bat`；若仍失败，从新 Release 解压覆盖，或手动运行 `SD-Trainer\scripts\portable\sync_portable_root_launchers.bat`。
-- **只解压过旧 7z、没有 `SD-Trainer\scripts\portable\`**：需下载新版 7z，或至少用新版替换整个 `SD-Trainer` 文件夹与根目录 `run_gui.bat`。
-- 实际启动逻辑在 `SD-Trainer\scripts\portable\launch_portable.bat`，随项目更新，不要删改 `python_embeded` / `SD-Trainer` 文件夹名。
+注意：`main`、`dev`、`legacy` 的前端不一样。  
+不要把未提交的 `frontend/dist` 热修混着提。  
+整合包用户直接用整包版本就行，不必自己切分支。
 
-</details>
+### `main` 为什么从旧 UI 换成了 Vue 3
+
+Vue 3 已经在 `dev` 上测过一轮，也修完关键问题。  
+转正是为了统一品牌和页面结构，让稳定修复和后面的正式整合包走同一条线。
+
+有些东西暂时没动：整合包里的目录名还是 `SD-Trainer/`，更新脚本的文件名也先保留，方便老安装继续用。
+
+源码合进 `main`，不等于每次改动都立刻出新 7z。正式整合包看 [GitHub Releases](https://github.com/wochenlong/lora-scripts-next/releases/tag/v3.0.0) 与 [魔搭](https://www.modelscope.cn/datasets/Next-Lab/next-trainer-releases)；**v3.0.0** 的 lite / kohya / musubi 已上线。
+
+还想用旧界面：
+
+1. 源码分支：[legacy/v2.9.1](https://github.com/wochenlong/lora-scripts-next/tree/legacy/v2.9.1)  
+2. 转正前快照：[legacy-v2.9.1-pre-vue3](https://github.com/wochenlong/lora-scripts-next/releases/tag/legacy-v2.9.1-pre-vue3)  
+3. 旧整合包：[v2.9.1](https://github.com/wochenlong/lora-scripts-next/releases/tag/v2.9.1)
+
+```powershell
+git fetch origin
+git switch legacy/v2.9.1
+```
+
+### 文档入口
+
+1. [开源引用与致谢 Akegarasu](docs/credits.md)  
+2. [NOTICE](NOTICE.md)  
+3. [整合包说明](docs/portable-getting-started.md)  
+4. [构建与发包](docs/portable-build-guide.md)  
+5. [打标模型](docs/tagger-models.md)  
+6. [训练监控](docs/train-monitor.md)  
+7. [仓库布局](docs/repo-layout.md)
+
+### 致谢 Akegarasu
+
+Next Trainer 感谢 **Akegarasu** 与 [Akegarasu/lora-scripts](https://github.com/Akegarasu/lora-scripts)（SD-Trainer / 秋叶一键训练包）长期公开的本地训练 WebUI 与整合包实践。本项目在这一谱系上继续演进。完整说明见 [开源引用](docs/credits.md) 与 [NOTICE.md](NOTICE.md)。
+
+### 常见问题
+
+**Bug 反馈要带什么**
+
+请尽量带上这些：
+
+1. 侧栏里的完整版本号  
+2. 你选的基础模型、引擎、训练目标  
+3. 复现步骤  
+4. 相关日志  
+
+然后到 [Issues](https://github.com/wochenlong/lora-scripts-next/issues) 提交。
+
+**lite / kohya / musubi 怎么选**
+
+1. 网络一般，或者只想先轻量启动，选 **lite**。第一次运行会装依赖。  
+2. 日常 Anima / SD / SDXL / Flux，选 **kohya**（默认）。  
+3. 要训 **Krea 2**，选 **musubi**（魔搭已上；引擎也可用设置页安装）。  
+4. Anima Fast 都要到设置页单独装，任何包都不预装 Fast。
+
+**3.0.0 和旧稳定版的配置能一起用吗**
+
+多数 TOML 还是可以导入的。  
+但导航结构和本地存储的 key 有差别，最终以当前页面导入后的结果为准。
+
+**更新后界面怎么全变了**
+
+这是预期现象。现在的 `main` 就是 Vue 3。
+
+还想用旧界面，可以：
+
+1. 切到 [legacy/v2.9.1](https://github.com/wochenlong/lora-scripts-next/tree/legacy/v2.9.1)  
+2. 或者安装 [v2.9.1 整合包](https://github.com/wochenlong/lora-scripts-next/releases/tag/v2.9.1)
 
 ---
 
-<details>
-<summary><b>更新日志</b></summary>
+## 更新日志
 
-| 日期 | 版本 |
-|------|------|
-| 2026-05-28 | **v2.7.0** — **Anima LoRA Fast 模式**（可选 `anima_lora` 插件）：WebUI 入口、页内安装、训练监控同步、性能对标与用户文档 · 见 [`docs/anima-fast.md`](docs/anima-fast.md) |
-| 2026-05-28 | **v2.6.0** — **Anima 全量微调** WebUI（`anima-finetune`）、`anima_train.py` 封装、全量微调导航、监控类型修正；约 24GB 显存参考 |
-| 2026-05-27 | **v2.5.3** — 便携包依赖健康检查、侧栏版本号 ([#54](https://github.com/wochenlong/lora-scripts-next/issues/54)) |
-| 2026-05-21 | **v2.5.0** — UI 焕新：侧栏导航重构、首页传送门、训练监控仪表盘新增 GPU 指标；CSS 去重清理 |
-| 2026-05-21 | **v2.4.0** — 训练稳定性：环境隔离、NaN 过滤、采样保护、attn_mode 降级、路径规范化；整合包 tkinter 修复 |
-| 2026-05-20 | **v2.3.0** — 训练监控升级：TensorBoard 同源曲线、参数速查、日志同步 |
-| 2026-05-19 | **v2.2.0** — 整合包 flash-attn 治本、闪退日志、跨盘监控 |
-| 2026-05-19 | **v2.1.0** — Flash Attention 2 预编译 wheel、按步数保存 |
-| 2026-05-18 | **v2.0.0** — 整合包首发、AMD 检测、bf16 修复 |
-
-详见 [CHANGELOG.md](CHANGELOG.md)。
-
-</details>
-
-<details>
-<summary><b>致谢</b></summary>
-
-[Akegarasu/lora-scripts](https://github.com/Akegarasu/lora-scripts) · [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts) · [LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS) · [T-LoRA](https://github.com/ControlGenAI/T-LoRA) — 完整归属见 [NOTICE.md](NOTICE.md)
-
-</details>
+完整变更见 [CHANGELOG.md](CHANGELOG.md)。  
+正式发布记录见 [Releases](https://github.com/wochenlong/lora-scripts-next/releases)。
 
 ---
 
-<p align="center"><sub>维护者：<b><a href="https://github.com/wochenlong">@wochenlong</a></b> · <a href="CONTRIBUTORS.md">贡献者</a></sub></p>
+<p align="center">
+  <sub>
+    维护 <a href="https://github.com/wochenlong">@wochenlong</a>
+    ·
+    <a href="docs/credits.md">开源引用</a>
+    ·
+    <a href="CONTRIBUTORS.md">贡献者</a>
+  </sub>
+</p>

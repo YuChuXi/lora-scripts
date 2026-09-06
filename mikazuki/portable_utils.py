@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Helpers for Windows portable (embedded) Python — flash-attn needs triton, which does not work reliably here."""
+"""Helpers for Windows portable (embedded) Python — flash-attn/triton compatibility."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ def is_embedded_python(executable: Optional[str] = None) -> bool:
 
 
 def flash_attn_stack_usable() -> bool:
-    """True only when flash-attn and its triton ops import cleanly (not true on embedded Python)."""
+    """True when flash-attn and its triton ops import cleanly in the current interpreter."""
     try:
         import triton  # noqa: F401
         import flash_attn  # noqa: F401
@@ -69,7 +69,8 @@ def train_env_overrides() -> Dict[str, str]:
     """Environment for training subprocesses on embedded Python."""
     if not is_embedded_python():
         return {}
-    return {
-        "TRANSFORMERS_ATTN_IMPLEMENTATION": "sdpa",
-        "XFORMERS_FORCE_DISABLE_TRITON": "1",
-    }
+
+    overrides: Dict[str, str] = {"XFORMERS_FORCE_DISABLE_TRITON": "1"}
+    if not flash_attn_stack_usable():
+        overrides["TRANSFORMERS_ATTN_IMPLEMENTATION"] = "sdpa"
+    return overrides

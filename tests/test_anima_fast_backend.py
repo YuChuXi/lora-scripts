@@ -11,8 +11,11 @@ from mikazuki.anima_fast_backend.adapter import (
     adapt_config,
     dataset_cache_slug,
     dump_flat_toml,
+    dump_fast_dataset_toml,
+    ensure_fast_run_log_dirs,
 )
 from mikazuki.anima_fast_backend.extension_state import (
+    STATE_BROKEN,
     STATE_INSTALLED_UNVERIFIED,
     STATE_NOT_INSTALLED,
     STATE_READY,
@@ -72,13 +75,20 @@ class ServiceResolverTests(unittest.TestCase):
 
 
 class ExtensionStateTests(unittest.TestCase):
+    def _make_ready_source(self, layout: ExtensionLayout) -> None:
+        layout.source.mkdir(parents=True)
+        layout.train_py.write_text("", encoding="utf-8")
+        (layout.source / "configs").mkdir()
+        (layout.source / "configs" / "base.toml").write_text("", encoding="utf-8")
+        (layout.source / "preprocess").mkdir()
+        (layout.source / "preprocess" / "resize_images.py").write_text("", encoding="utf-8")
+
     def test_status_transitions(self):
         with tempfile.TemporaryDirectory() as td:
             layout = ExtensionLayout(Path(td) / "anima_lora")
 
             self.assertEqual(read_extension_status(layout).state, STATE_NOT_INSTALLED)
-            layout.source.mkdir(parents=True)
-            layout.train_py.write_text("", encoding="utf-8")
+            self._make_ready_source(layout)
             self.assertEqual(read_extension_status(layout).state, STATE_INSTALLED_UNVERIFIED)
             layout.venv_python.parent.mkdir(parents=True)
             layout.venv_python.write_text("", encoding="utf-8")
@@ -88,6 +98,21 @@ class ExtensionStateTests(unittest.TestCase):
 
         self.assertEqual(status.state, STATE_READY)
         self.assertEqual(status.facts["torch"], "ok")
+
+    def test_ready_state_downgrades_when_runtime_files_are_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            layout = ExtensionLayout(Path(td) / "anima_lora")
+            layout.source.mkdir(parents=True)
+            layout.train_py.write_text("", encoding="utf-8")
+            layout.venv_python.parent.mkdir(parents=True)
+            layout.venv_python.write_text("", encoding="utf-8")
+            write_install_state(layout, STATE_READY, {"audit": {"ok": True}})
+
+            status = read_extension_status(layout)
+
+        self.assertEqual(status.state, STATE_BROKEN)
+        self.assertIn("configs/base.toml", status.reason)
+        self.assertIn("preprocess/resize_images.py", status.reason)
 
 
 class InstallerTests(unittest.TestCase):
@@ -193,6 +218,43 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(lora_cache, (root / ".cache" / "anima_fast" / "data_train_data" / "lora").resolve())
         self.assertNotIn("20260101-run", resized.as_posix())
 
+    def test_adapt_config_maps_fast_dataset_batch_size_and_repeats(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            adapted = adapt_config(
+                {
+                    "lora_type": "lora",
+                    "train_batch_size": 4,
+                    "dataset_repeats": 7,
+                },
+                runtime,
+                "run-1",
+            )
+
+        self.assertEqual(adapted.values["train_batch_size"], 4)
+        self.assertEqual(adapted.values["batch_size"], 4)
+        self.assertEqual(adapted.values["dataset_repeats"], 7)
+
+    def test_dump_fast_dataset_toml_writes_dataset_overrides(self):
+        text = dump_fast_dataset_toml(
+            {
+                "resized_image_dir": "D:/data/resized",
+                "lora_cache_dir": "D:/data/lora",
+                "caption_extension": ".txt",
+                "resolution": "1024,1024",
+                "enable_bucket": True,
+                "train_batch_size": 4,
+                "dataset_repeats": 7,
+            }
+        )
+
+        self.assertIn("[[datasets]]", text)
+        self.assertIn("resolution = [1024, 1024]", text)
+        self.assertIn("batch_size = 4", text)
+        self.assertIn("[[datasets.subsets]]", text)
+        self.assertIn("num_repeats = 7", text)
+
     def test_dataset_cache_slug_from_relative_path(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -234,6 +296,72 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(adapted.values["static_token_count"], 9216)
         self.assertTrue(any("static_token_count" in warning for warning in adapted.warnings))
 
+    def test_adapt_config_derives_max_bucket_reso_for_high_resolution(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({
+                "lora_type": "lora",
+                "resolution": "1536,1536",
+                "enable_bucket": True,
+            }, runtime, "run-1")
+
+        self.assertEqual(adapted.values["max_bucket_reso"], 1536)
+        self.assertTrue(any("max_bucket_reso" in warning for warning in adapted.warnings))
+        self.assertIn("max_bucket_reso = 1536", dump_fast_dataset_toml(adapted.values))
+
+    def test_adapt_config_preserves_valid_user_max_bucket_reso(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({
+                "lora_type": "lora",
+                "resolution": "1536,1536",
+                "enable_bucket": True,
+                "max_bucket_reso": 2048,
+            }, runtime, "run-1")
+
+        self.assertEqual(adapted.values["max_bucket_reso"], 2048)
+        self.assertFalse(any("max_bucket_reso" in warning for warning in adapted.warnings))
+
+    def test_adapt_config_rejects_max_bucket_reso_below_resolution(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            with self.assertRaisesRegex(
+                AdapterError,
+                "max_bucket_reso=1024.*resolution=1536,1536",
+            ):
+                adapt_config({
+                    "lora_type": "lora",
+                    "resolution": "1536,1536",
+                    "enable_bucket": True,
+                    "max_bucket_reso": 1024,
+                }, runtime, "run-1")
+
+    def test_adapt_config_rounds_max_bucket_reso_to_bucket_step(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({
+                "lora_type": "lora",
+                "resolution": "1536,1536",
+                "enable_bucket": True,
+                "max_bucket_reso": 1550,
+                "bucket_reso_steps": 64,
+            }, runtime, "run-1")
+
+        self.assertEqual(adapted.values["max_bucket_reso"], 1600)
+        self.assertTrue(any("1550" in warning and "1600" in warning for warning in adapted.warnings))
+
+    def test_adapt_config_derives_bucket_limit_when_no_upscale_is_enabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({
+                "lora_type": "lora",
+                "resolution": "1536,1536",
+                "enable_bucket": True,
+                "bucket_no_upscale": True,
+            }, runtime, "run-1")
+
+        self.assertEqual(adapted.values["max_bucket_reso"], 1536)
+
     def test_adapt_config_ignores_unsupported_fast_memory_fields(self):
         with tempfile.TemporaryDirectory() as td:
             runtime = make_runtime(Path(td))
@@ -249,6 +377,50 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn("unsloth_offload_checkpointing", adapted.values)
         self.assertTrue(any("blocks_to_swap" in warning for warning in adapted.warnings))
 
+    def test_adapt_config_forces_live_encoding_cache_overrides(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({
+                "lora_type": "lora",
+                "cache_latents": False,
+                "cache_latents_to_disk": True,
+                "cache_text_encoder_outputs": False,
+                "cache_text_encoder_outputs_to_disk": True,
+            }, runtime, "run-1")
+
+        self.assertFalse(adapted.values["cache_latents"])
+        self.assertFalse(adapted.values["cache_latents_to_disk"])
+        self.assertFalse(adapted.values["cache_text_encoder_outputs"])
+        self.assertFalse(adapted.values["cache_text_encoder_outputs_to_disk"])
+        toml_text = dump_flat_toml(adapted.values)
+        self.assertIn("cache_latents_to_disk = false", toml_text)
+        self.assertIn("cache_text_encoder_outputs_to_disk = false", toml_text)
+
+    def test_adapt_config_uses_short_fast_log_defaults(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({
+                "lora_type": "lora",
+            }, runtime, "run-1")
+
+        self.assertEqual(adapted.values["log_prefix"], "af_")
+        self.assertEqual(adapted.values["log_tracker_name"], "tb")
+
+    def test_ensure_fast_run_log_dirs_creates_tracker_dirs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            values = {
+                "logging_dir": str(root / "logs" / "anima_fast"),
+                "method": "lora",
+                "log_tracker_name": "network_train",
+            }
+
+            created = ensure_fast_run_log_dirs(values, now=None)
+
+            self.assertTrue((root / "logs" / "anima_fast").is_dir())
+            self.assertGreaterEqual(len(created), 4)
+            self.assertTrue(any(path.name == "network_train" for path in created))
+
     def test_adapt_config_disables_cache_when_skip_cache_check_is_combined(self):
         with tempfile.TemporaryDirectory() as td:
             runtime = make_runtime(Path(td))
@@ -260,7 +432,9 @@ class AdapterTests(unittest.TestCase):
             }, runtime, "run-1")
 
         self.assertFalse(adapted.values["cache_latents"])
+        self.assertFalse(adapted.values["cache_latents_to_disk"])
         self.assertFalse(adapted.values["cache_text_encoder_outputs"])
+        self.assertFalse(adapted.values["cache_text_encoder_outputs_to_disk"])
         self.assertFalse(adapted.values["skip_cache_check"])
         self.assertTrue(any("skip_cache_check" in warning for warning in adapted.warnings))
 

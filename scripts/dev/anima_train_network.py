@@ -11,6 +11,7 @@ if ROOT_STR not in sys.path:
     sys.path.insert(0, ROOT_STR)
 
 from mikazuki.anima_backend.adapter import adapt_anima_config
+from mikazuki.anima_backend.lycoris_patch import patch_lokr_dora_bf16_forward
 from mikazuki.anima_backend.upstream import (
     load_toml_file,
     prefer_upstream_imports,
@@ -65,6 +66,7 @@ def main() -> None:
     verify_pinned_commit(root)
     upstream_path = resolve_upstream_path(root)
     prefer_upstream_imports(upstream_path)
+    patch_lokr_dora_bf16_forward()
     _rewrite_config_file(sys.argv)
     script = upstream_entrypoint(upstream_path, _read_backend_entrypoint(root))
     if os.environ.get("ANIMA_BACKEND_WRAPPER_SMOKE") == "1":
