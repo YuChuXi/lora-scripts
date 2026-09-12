@@ -1,0 +1,1 @@
+@Mo6+, 1girl, solo, outdoors, long hair, short hair, sky, white hair, shirt, closed mouth, day,  --n worst quality, low quality, score_1, score_2, score_3, artist name, jpeg artifacts  --w 1024 --h 1024 --l 4  --s 30  --d 42

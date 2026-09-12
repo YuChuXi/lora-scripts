@@ -1,1 +1,1 @@
-@guo582,  --n worst quality, low quality, score_1, score_2, score_3, artist name, jpeg artifacts  --w 1024 --h 1024 --l 4  --s 30  --d 42
+@guo582, looking at viewer, solo, 1girl, blush, long hair, hair ornament, hair between eyes, long sleeves, flower, animal ears,  --n worst quality, low quality, score_1, score_2, score_3, artist name, jpeg artifacts  --w 1024 --h 1024 --l 4  --s 30  --d 42

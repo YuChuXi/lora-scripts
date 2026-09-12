@@ -24,11 +24,11 @@ lr_scheduler = "cosine_with_min_lr"
 lr_scheduler_min_lr_ratio = 0.01
 lr_warmup_steps = 50
 optimizer_type = "AdamW"
-network_dim = 32
-network_alpha = 32
-network_module = "lycoris.kohya"
+network_dim = 12
+network_alpha = 12
+network_module = "networks.lora_anima"
 network_dropout = 0.1
-network_args = ["dora_wd=1"]
+network_args = []
 sample_at_first = true
 sample_every_n_steps = 50
 log_with = "wandb"
@@ -44,6 +44,6 @@ cache_latents_to_disk = true
 max_data_loader_n_workers = 0
 optimizer_args = ["weight_decay=0.001"]
 masked_loss = true
-output_name = "qianhu_anima"
-sample_prompts = "/home/yuchuxi/Projects/Experiments/Dataset/lora-scripts/config/qianhu/prompt.txt"
-dataset_config = "/home/yuchuxi/Projects/Experiments/Dataset/lora-scripts/config/qianhu/dataset.toml"
+output_name = "幽夢33_anima"
+sample_prompts = "/home/yuchuxi/Projects/Experiments/Dataset/lora-scripts/config/幽夢33/prompt.txt"
+dataset_config = "/home/yuchuxi/Projects/Experiments/Dataset/lora-scripts/config/幽夢33/dataset.toml"

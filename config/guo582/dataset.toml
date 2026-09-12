@@ -14,11 +14,25 @@ resolution = 1536
 
 
 [[datasets]]
+resolution = 1536
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/head"
+  num_repeats = 1
+
+
+[[datasets]]
 resolution = 1024
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/main"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/mask/main"
-  num_repeats = 1
+  num_repeats = 2
+
+
+[[datasets]]
+resolution = 1024
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/head"
+  num_repeats = 2
 
 
 [[datasets]]
@@ -30,33 +44,18 @@ resolution = 512
 
 
 [[datasets]]
-resolution = 1536
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/head"
-  num_repeats = 1
-
-
-[[datasets]]
-resolution = 1024
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/head"
-  num_repeats = 1
-
-
-[[datasets]]
 resolution = 512
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/guo582/head"
   num_repeats = 1
+# [[datasets]]
+# resolution = 1536
 
-[[datasets]]
-resolution = 1536
+# [[datasets.subsets]]
+# image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
 
-[[datasets.subsets]]
-image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
+# [[datasets]]
+# resolution = 1024
 
-[[datasets]]
-resolution = 1024
-
-[[datasets.subsets]]
-image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_2"
+# [[datasets.subsets]]
+# image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_2"

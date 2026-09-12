@@ -1,0 +1,29 @@
+[general]
+enable_bucket = true
+min_bucket_reso = 256
+max_bucket_reso = 1536
+bucket_reso_steps = 64
+bucket_no_upscale = true
+
+[[datasets]]
+resolution = 1536
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/gpt"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/mask/gpt"
+  num_repeats = 3
+
+
+[[datasets]]
+resolution = 1024
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/gpt"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/mask/gpt"
+  num_repeats = 3
+
+
+[[datasets]]
+resolution = 512
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/gpt"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/mask/gpt"
+  num_repeats = 3
