@@ -17,8 +17,8 @@ train_batch_size = 2
 gradient_checkpointing = true
 gradient_accumulation_steps = 4
 network_train_unet_only = true
-learning_rate = 5e-05
-unet_lr = 5e-05
+learning_rate = 1e-05
+unet_lr = 1e-05
 text_encoder_lr = 0
 lr_scheduler = "cosine_with_min_lr"
 lr_scheduler_min_lr_ratio = 0.01
@@ -26,9 +26,9 @@ lr_warmup_steps = 50
 optimizer_type = "AdamW"
 network_dim = 32
 network_alpha = 32
-network_module = "lycoris.kohya"
-network_dropout = 0.1
-network_args = ["dora_wd=1"]
+network_module = "networks.lora_anima"
+network_dropout = 0.2
+network_args = ["loraplus_unet_lr_ratio=16"]
 sample_at_first = true
 sample_every_n_steps = 50
 log_with = "wandb"

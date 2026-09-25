@@ -1,31 +1,43 @@
 [general]
-resolution = 1536
 enable_bucket = true
 min_bucket_reso = 256
-max_bucket_reso = 2048
+max_bucket_reso = 1536
 bucket_reso_steps = 64
 bucket_no_upscale = true
 
 [[datasets]]
+resolution = 1536
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chen_bin/main"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chen_bin/mask/main"
   num_repeats = 1
 
-[[datasets]]
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chen_bin/head"
-  num_repeats = 1
-
-  [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chen_bin/foot"
-  num_repeats = 1
 
 [[datasets]]
+resolution = 1024
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chen_bin/main"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chen_bin/mask/main"
+  num_repeats = 2
+
+
+[[datasets]]
+resolution = 512
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chen_bin/main"
+  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/chen_bin/mask/main"
+  num_repeats = 1
+
+
+[[datasets]]
+resolution = 1536
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
   num_repeats = 1
 
+
+[[datasets]]
+resolution = 1024
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_2"
   num_repeats = 1

@@ -3,11 +3,11 @@ vae = "/media/yuchuxi/Data/Servers/ComfyUI/models/vae/qwen_image_vae.safetensors
 qwen3 = "/media/yuchuxi/Data/Servers/ComfyUI/models/text_encoders/qwen_3_06b_base.safetensors"
 qwen3_max_token_length = 1024
 t5_max_token_length = 1024
-timestep_sampling = "uniform"
+timestep_sampling = "flux_shift"
+sigmoid_scale = 1.0
 attn_mode = "flash"
-prior_loss_weight = 1
+prior_loss_weight = 0.5
 resolution = "1536"
-output_name = "chen_bin_anima"
 output_dir = "./output"
 save_model_as = "safetensors"
 save_precision = "bf16"
@@ -20,42 +20,30 @@ network_train_unet_only = true
 learning_rate = 1e-05
 unet_lr = 1e-05
 text_encoder_lr = 0
-lr_scheduler = "cosine"
-lr_warmup_steps = 100
+lr_scheduler = "cosine_with_min_lr"
+lr_scheduler_min_lr_ratio = 0.01
+lr_warmup_steps = 50
 optimizer_type = "AdamW"
 network_dim = 16
 network_alpha = 16
 network_module = "networks.lora_anima"
 network_dropout = 0.1
-network_args = [
-    "rank_dropout=0.1", 
-    "module_dropout=0.1", 
-    "network_reg_lrs=r'.*blocks\\.19\\..*'=2e-05",
-    "network_reg_lrs=r'.*blocks\\.20\\..*'=3e-05",
-    "network_reg_lrs=r'.*blocks\\.21\\..*'=4e-05",
-    "network_reg_lrs=r'.*blocks\\.22\\..*'=5e-05",
-    "network_reg_lrs=r'.*blocks\\.23\\..*'=6e-05",
-    "network_reg_lrs=r'.*blocks\\.24\\..*'=7e-05",
-    "network_reg_lrs=r'.*blocks\\.25\\..*'=8e-05",
-    "network_reg_lrs=r'.*blocks\\.26\\..*'=9e-05",
-    "network_reg_lrs=r'.*blocks\\.27\\..*'=1e-04",
-]
+network_args = ["loraplus_unet_lr_ratio=16"]
 sample_at_first = true
 sample_every_n_steps = 50
-log_with = "tensorboard"
+log_with = "wandb"
 logging_dir = "./logs"
 caption_extension = ".txt"
 shuffle_caption = true
 keep_tokens_separator = "|||"
-caption_dropout_rate = 0.1
 caption_tag_dropout_rate = 0.5
-prefer_json_caption = true
 seed = 1337
 mixed_precision = "bf16"
 cache_latents = true
 cache_latents_to_disk = true
 max_data_loader_n_workers = 0
-optimizer_args = ["weight_decay=0.1"]
+optimizer_args = ["weight_decay=0.001"]
 masked_loss = true
-sample_prompts = "./config/chen_bin/prompt.txt"
-dataset_config = "./config/chen_bin/dataset.toml"
+output_name = "chen_bin_anima"
+sample_prompts = "/home/yuchuxi/Projects/Experiments/Dataset/lora-scripts/config/chen_bin/prompt.txt"
+dataset_config = "/home/yuchuxi/Projects/Experiments/Dataset/lora-scripts/config/chen_bin/dataset.toml"

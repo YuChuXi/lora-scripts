@@ -10,7 +10,7 @@ resolution = 1536
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/gpt"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/mask/gpt"
-  num_repeats = 3
+  num_repeats = 1
 
 
 [[datasets]]
@@ -18,12 +18,18 @@ resolution = 1024
   [[datasets.subsets]]
   image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/gpt"
   conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/mask/gpt"
-  num_repeats = 3
+  num_repeats = 2
 
 
 [[datasets]]
-resolution = 512
+resolution = 1536
   [[datasets.subsets]]
-  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/gpt"
-  conditioning_data_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/纸偶/mask/gpt"
-  num_repeats = 3
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_1"
+  num_repeats = 1
+
+
+[[datasets]]
+resolution = 1024
+  [[datasets.subsets]]
+  image_dir = "/home/yuchuxi/Projects/Experiments/Dataset/ZhaoLora/datasets/regL/256_2"
+  num_repeats = 1
