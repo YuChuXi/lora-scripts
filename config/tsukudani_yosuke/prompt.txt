@@ -1,0 +1,1 @@
+@tsukudani yosuke, original, 1girl, short hair, animal ears, breasts, tail, blue eyes, cat ears, cat girl, smile,  --n worst quality, low quality, score_1, score_2, score_3, artist name, jpeg artifacts  --w 1024 --h 1024 --l 4  --s 30  --d 42

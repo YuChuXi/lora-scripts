@@ -1,0 +1,1 @@
+@yoi (a27963244), solo, 1girl, simple background, smile, long hair, looking at viewer, white background, arknights, closed mouth,  --n worst quality, low quality, score_1, score_2, score_3, artist name, jpeg artifacts  --w 1024 --h 1024 --l 4  --s 30  --d 42
