@@ -11,23 +11,67 @@ from unittest import mock
 
 from starlette.requests import Request
 
-stub_interrogator = types.ModuleType("mikazuki.tagger.interrogator")
-stub_interrogator.available_interrogators = {}
-stub_jobs = types.ModuleType("mikazuki.tagger.jobs")
-stub_jobs.run_interrogate_job = lambda *args, **kwargs: None
-stub_jobs.run_prefetch_job = lambda *args, **kwargs: None
-stub_progress = types.ModuleType("mikazuki.tagger.progress")
-stub_progress.tagger_progress = types.SimpleNamespace(
-    get=lambda: {},
-    request_cancel=lambda: False,
-    is_busy=lambda: False,
-    reset_idle=lambda message=None: None,
+_STUB_NAMES = (
+    "mikazuki.tagger.interrogator",
+    "mikazuki.tagger.jobs",
+    "mikazuki.tagger.progress",
 )
-sys.modules["mikazuki.tagger.interrogator"] = stub_interrogator
-sys.modules["mikazuki.tagger.jobs"] = stub_jobs
-sys.modules["mikazuki.tagger.progress"] = stub_progress
+_MISSING = object()
+_saved_modules = {name: sys.modules.get(name, _MISSING) for name in _STUB_NAMES}
+try:
+    stub_interrogator = types.ModuleType("mikazuki.tagger.interrogator")
+    stub_interrogator.available_interrogators = {}
+    stub_jobs = types.ModuleType("mikazuki.tagger.jobs")
+    stub_jobs.run_interrogate_job = lambda *args, **kwargs: None
+    stub_jobs.run_prefetch_job = lambda *args, **kwargs: None
+    stub_progress = types.ModuleType("mikazuki.tagger.progress")
+    stub_progress.tagger_progress = types.SimpleNamespace(
+        get=lambda: {},
+        request_cancel=lambda: False,
+        is_busy=lambda: False,
+        reset_idle=lambda message=None: None,
+    )
+    sys.modules["mikazuki.tagger.interrogator"] = stub_interrogator
+    sys.modules["mikazuki.tagger.jobs"] = stub_jobs
+    sys.modules["mikazuki.tagger.progress"] = stub_progress
 
-from mikazuki.app import api
+    _api_pre_cached = "mikazuki.app.api" in sys.modules
+    from mikazuki.app import api
+finally:
+    # Pytest imports all test modules during collection. Restore these stubs
+    # immediately so later modules collect the real tagger implementations.
+    for name, original in _saved_modules.items():
+        if original is _MISSING:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
+    # Restoring sys.modules does not rebind the tagger symbols that
+    # mikazuki.app.api already imported (Copilot C-7). When THIS import was
+    # the first one, the cached module is stub-bound; evict it (module table
+    # AND the package attribute) so later collectors re-import real bindings,
+    # while this file keeps its local `api` reference for its own tests.
+    if not _api_pre_cached:
+        sys.modules.pop("mikazuki.app.api", None)
+        _app_package = sys.modules.get("mikazuki.app")
+        if _app_package is not None and getattr(_app_package, "api", None) is api:
+            delattr(_app_package, "api")
+
+# (The tagger stubs themselves were already restored in the ``finally`` block
+# above; the earlier second restore pass is subsumed by it.)
+
+# If api was freshly imported through the stubs, its own globals still hold the
+# stub objects. Rebind them from the real modules so later tests never observe
+# collection-order-dependent tagger bindings. This pass also covers the case
+# where ``mikazuki.app.api`` was ALREADY cached by an earlier collector (the
+# C-7 eviction below the finally-block only fires for first-time imports).
+import mikazuki.tagger.interrogator as _real_interrogator
+import mikazuki.tagger.jobs as _real_jobs
+import mikazuki.tagger.progress as _real_progress
+
+api.available_interrogators = _real_interrogator.available_interrogators
+api.run_interrogate_job = _real_jobs.run_interrogate_job
+api.run_prefetch_job = _real_jobs.run_prefetch_job
+api.tagger_progress = _real_progress.tagger_progress
 
 
 def make_request(payload: dict) -> Request:
@@ -39,6 +83,14 @@ def make_request(payload: dict) -> Request:
     return Request({"type": "http", "method": "POST", "path": "/api/run", "headers": []}, receive)
 
 
+def kohya_ready():
+    """kohya handle_run now gates on the managed venv being installed."""
+    return mock.patch(
+        "mikazuki.engines.kohya.extension_state.read_status",
+        return_value={"state": "ready", "facts": {}},
+    )
+
+
 class StandardRunApiTests(unittest.TestCase):
     def test_run_rejects_unknown_standard_train_type_without_500(self):
         response = asyncio.run(api.create_toml_file(make_request({"model_train_type": "unknown-lora"})))
@@ -47,21 +99,33 @@ class StandardRunApiTests(unittest.TestCase):
         self.assertIn("不支持的训练类型", response.message)
         self.assertEqual(response.data["model_train_type"], "unknown-lora")
 
-    def test_run_rejects_missing_train_data_dir_without_connect_error(self):
+    def test_run_rejected_when_kohya_env_not_ready(self):
         response = asyncio.run(api.create_toml_file(make_request({
             "model_train_type": "sd-lora",
+            "train_data_dir": "E:/OpenSourceTeamWork/not-used",
             "pretrained_model_name_or_path": "runwayml/stable-diffusion-v1-5",
         })))
+
+        self.assertEqual(response.status, "fail")
+        self.assertIn("未就绪", response.message)
+
+    def test_run_rejects_missing_train_data_dir_without_connect_error(self):
+        with kohya_ready():
+            response = asyncio.run(api.create_toml_file(make_request({
+                "model_train_type": "sd-lora",
+                "pretrained_model_name_or_path": "runwayml/stable-diffusion-v1-5",
+            })))
 
         self.assertEqual(response.status, "fail")
         self.assertEqual(response.data["field"], "train_data_dir")
         self.assertIn("训练数据集路径", response.message)
 
     def test_run_rejects_missing_model_path_without_connect_error(self):
-        response = asyncio.run(api.create_toml_file(make_request({
-            "model_train_type": "sd-lora",
-            "train_data_dir": "E:/OpenSourceTeamWork/not-used",
-        })))
+        with kohya_ready():
+            response = asyncio.run(api.create_toml_file(make_request({
+                "model_train_type": "sd-lora",
+                "train_data_dir": "E:/OpenSourceTeamWork/not-used",
+            })))
 
         self.assertEqual(response.status, "fail")
         self.assertEqual(response.data["field"], "pretrained_model_name_or_path")
@@ -94,6 +158,7 @@ class StandardRunApiTests(unittest.TestCase):
             )
 
             with mock.patch.object(api.os, "getcwd", return_value=str(root)), \
+                    kohya_ready(), \
                     mock.patch.object(api.process, "run_train", return_value=fake_response) as run_train:
                 response = asyncio.run(api.create_toml_file(make_request(payload)))
 
@@ -133,6 +198,7 @@ class StandardRunApiTests(unittest.TestCase):
             )
 
             with mock.patch.object(api.os, "getcwd", return_value=str(root)), \
+                    kohya_ready(), \
                     mock.patch.object(api.process, "run_train", return_value=fake_response) as run_train:
                 response = asyncio.run(api.create_toml_file(make_request(payload)))
 

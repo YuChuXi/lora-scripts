@@ -3,18 +3,27 @@ import { computed, ref } from "vue"
 import { ElMessage } from "element-plus"
 import { useI18n } from "vue-i18n"
 import { schemasApi, type PickerFile } from "../api/schemas"
+import { datasetsApi, type DatasetEntry } from "../api/datasets"
 import type { FormField, FormValue } from "../schema/adapter"
+import ReferencePathsField from "./ReferencePathsField.vue"
+import PreviewSampleField from "./PreviewSampleField.vue"
 import PathPickerDialog from "./PathPickerDialog.vue"
 import { useServerPathPick } from "../composables/useServerPathPick"
 
-const props = defineProps<{ field: FormField; modelValue: FormValue; error?: string }>()
-const emit = defineEmits<{ "update:modelValue": [value: FormValue] }>()
+const props = defineProps<{ field: FormField; modelValue: FormValue; defaultValue?: FormValue; error?: string; editing?: boolean }>()
+const emit = defineEmits<{ "update:modelValue": [value: FormValue]; reset: [] }>()
 const { t } = useI18n()
 const files = ref<PickerFile[]>([])
 const catalogOpen = ref(false)
+const datasetOpen = ref(false)
+const datasetEntries = ref<DatasetEntry[]>([])
 const picking = ref(false)
 const pickerType = computed(() => String(props.field.extra?.type || "folder"))
 const internalPicker = computed(() => props.field.extra?.internal ? String(props.field.extra.internal) : "")
+const selectValue = computed(() => props.field.type === "array" && props.field.options && props.modelValue === undefined ? [] : props.modelValue)
+const resettable = computed(() => !(props.field.disabled || props.field.hidden || props.field.type === "const"))
+const resetDisabled = computed(() => sameValue(props.modelValue, props.defaultValue))
+const resetLabel = computed(() => t(resetDisabled.value ? "schemaForm.defaultRestored" : "schemaForm.restoreDefault"))
 const {
   open: pathPickerOpen,
   mode: pathPickerMode,
@@ -34,14 +43,22 @@ const compact = computed(() => {
   return props.field.type === "string" && !props.field.role
 })
 
+function sameValue(left: FormValue, right: FormValue) {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false
+    return left.every((item, index) => item === right[index])
+  }
+  return left === right
+}
+
 async function pick() {
   picking.value = true
   try {
-    const isFile = pickerType.value === "model-file"
+    const isFile = ["model-file", "file"].includes(pickerType.value)
     const path = await pickServerPath({
       mode: isFile ? "file" : "folder",
       initialPath: typeof props.modelValue === "string" ? props.modelValue : "",
-      nameFilter: isFile ? "*.safetensors;*.ckpt;*.pt" : "",
+      nameFilter: isFile ? String(props.field.extra?.filter || "*.safetensors;*.ckpt;*.pt") : "",
     })
     if (path) emit("update:modelValue", path)
   } catch (error) {
@@ -59,37 +76,72 @@ async function openCatalog() {
     ElMessage.error(error instanceof Error ? error.message : t("schemaForm.catalogFail"))
   }
 }
+
+const isTrainDirPicker = computed(() => internalPicker.value === "train-dir")
+
+async function openDatasets() {
+  try {
+    datasetEntries.value = (await datasetsApi.list()).datasets
+    datasetOpen.value = true
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : t("schemaForm.datasetFail"))
+  }
+}
+
+function datasetStat(entry: DatasetEntry) {
+  const overview = entry.overview
+  if (!overview || overview.state !== "ready" || overview.file_count == null) return ""
+  return t("schemaForm.datasetStat", { total: overview.file_count, captioned: overview.captioned_count ?? 0 })
+}
 </script>
 
 <template>
-  <label class="schema-field" :class="{ 'has-error': error, 'schema-field--compact': compact }">
+  <component :is="$slots['before-control'] ? 'div' : 'label'" class="schema-field" :class="{ 'has-error': error, 'schema-field--compact': compact }">
     <span class="field-text">
       <span class="field-label"><code>{{ field.key }}</code><b v-if="field.required">{{ t("schemaForm.required") }}</b></span>
       <span v-if="field.description" class="field-description">{{ field.description }}</span>
     </span>
-    <span class="field-control">
-      <el-switch v-if="field.type === 'boolean'" :model-value="Boolean(modelValue)" :disabled="field.disabled" @update:model-value="emit('update:modelValue', $event)" />
-      <el-select v-else-if="field.options" :model-value="modelValue" :disabled="field.disabled" :multiple="field.type === 'array'" clearable @update:model-value="emit('update:modelValue', $event)">
-        <el-option v-for="option in field.options" :key="String(option)" :label="String(option) || t('schemaForm.emptyOption')" :value="option ?? ''" />
-      </el-select>
-      <el-input-number v-else-if="field.type === 'number'" :model-value="modelValue as number | undefined" :disabled="field.disabled" :min="field.min" :max="field.max" :step="field.step || 1" controls-position="right" @update:model-value="emit('update:modelValue', $event ?? undefined)" />
-      <el-input v-else-if="field.type === 'array' || field.role === 'table'" v-model="arrayText" type="textarea" :rows="4" :disabled="field.disabled" :placeholder="t('schemaForm.arrayPlaceholder')" />
-      <el-input v-else-if="field.role === 'textarea'" :model-value="modelValue as string | undefined" type="textarea" :rows="5" :disabled="field.disabled" @update:model-value="emit('update:modelValue', $event)" />
-      <span v-else-if="field.role === 'filepicker'" class="filepicker-control">
-        <el-input :model-value="modelValue as string | undefined" :disabled="field.disabled" @update:model-value="emit('update:modelValue', $event)" />
-        <el-button :loading="picking" :disabled="field.disabled" @click.prevent="pick">{{ t("schemaForm.browse") }}</el-button>
-        <el-button v-if="internalPicker" :disabled="field.disabled" @click.prevent="openCatalog">{{ t("schemaForm.commonPaths") }}</el-button>
+    <slot name="before-control" />
+    <span class="field-control-wrap">
+      <span class="field-control">
+        <el-switch v-if="field.type === 'boolean'" :model-value="Boolean(modelValue)" :disabled="field.disabled" @update:model-value="emit('update:modelValue', $event)" />
+        <el-select v-else-if="field.options" :model-value="selectValue" :disabled="field.disabled" :multiple="field.type === 'array'" clearable @update:model-value="emit('update:modelValue', $event)">
+          <el-option v-for="option in field.options" :key="String(option)" :label="String(option) || t('schemaForm.emptyOption')" :value="option ?? ''" />
+        </el-select>
+        <el-input-number v-else-if="field.type === 'number'" :model-value="modelValue as number | undefined" :disabled="field.disabled" :min="field.min" :max="field.max" :step="field.step || 1" :step-strictly="field.extra?.integer === true" :precision="field.extra?.integer === true ? 0 : undefined" controls-position="right" @update:model-value="emit('update:modelValue', $event ?? undefined)" />
+        <PreviewSampleField v-else-if="field.role === 'preview-samples'" :samples="modelValue as string[] | undefined" :editing="editing" :dimension-step="Number(field.extra?.dimensionStep || 1)" :min-guidance="Number(field.extra?.minGuidance || 0)" :disabled="field.disabled" @update:samples="emit('update:modelValue', $event)" />
+        <ReferencePathsField v-else-if="field.role === 'reference-paths'" :model-value="(modelValue as string[] | undefined) || []" :disabled="field.disabled" :internal-picker="String(field.extra?.internal || '')" @update:model-value="emit('update:modelValue', $event)" />
+        <el-input v-else-if="field.type === 'array' || field.role === 'table'" v-model="arrayText" type="textarea" :rows="4" :disabled="field.disabled" :placeholder="t('schemaForm.arrayPlaceholder')" />
+        <el-input v-else-if="field.role === 'textarea'" :model-value="modelValue as string | undefined" type="textarea" :rows="5" :disabled="field.disabled" @update:model-value="emit('update:modelValue', $event)" />
+        <span v-else-if="field.role === 'filepicker'" class="filepicker-control">
+          <el-input :model-value="modelValue as string | undefined" :disabled="field.disabled" @update:model-value="emit('update:modelValue', $event)" />
+          <el-button :loading="picking" :disabled="field.disabled" @click.prevent="pick">{{ t("schemaForm.browse") }}</el-button>
+          <el-button v-if="internalPicker" :disabled="field.disabled" @click.prevent="openCatalog">{{ t("schemaForm.commonPaths") }}</el-button>
+          <el-button v-if="isTrainDirPicker" :disabled="field.disabled" @click.prevent="openDatasets">{{ t("schemaForm.pickDataset") }}</el-button>
+        </span>
+        <el-input v-else :model-value="modelValue as string | undefined" :disabled="field.disabled || field.type === 'const'" @update:model-value="emit('update:modelValue', $event)" />
       </span>
-      <el-input v-else :model-value="modelValue as string | undefined" :disabled="field.disabled || field.type === 'const'" @update:model-value="emit('update:modelValue', $event)" />
+      <el-tooltip v-if="resettable" :content="resetLabel">
+        <button type="button" class="field-reset" :disabled="resetDisabled" :title="resetLabel" :aria-label="resetLabel" @click.prevent="emit('reset')">↺</button>
+      </el-tooltip>
     </span>
     <span v-if="error" class="field-error">{{ error }}</span>
-  </label>
+  </component>
 
   <el-dialog v-model="catalogOpen" :title="t('schemaForm.catalogTitle')" width="min(680px, 92vw)">
     <div class="picker-list">
       <button v-for="file in files" :key="file.path" @click="emit('update:modelValue', file.path); catalogOpen = false">
         <strong>{{ file.name }}</strong><span>{{ file.path }}</span><small v-if="file.size">{{ file.size }}</small>
       </button>
+    </div>
+  </el-dialog>
+
+  <el-dialog v-model="datasetOpen" :title="t('schemaForm.datasetTitle')" width="min(680px, 92vw)">
+    <div class="picker-list">
+      <button v-for="entry in datasetEntries" :key="entry.path" @click="emit('update:modelValue', entry.path); datasetOpen = false">
+        <strong>{{ entry.name }}</strong><span>{{ entry.path }}</span><small v-if="datasetStat(entry)">{{ datasetStat(entry) }}</small>
+      </button>
+      <p v-if="!datasetEntries.length">{{ t("schemaForm.datasetEmpty") }}</p>
     </div>
   </el-dialog>
 

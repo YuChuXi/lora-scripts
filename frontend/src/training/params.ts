@@ -1,4 +1,6 @@
-import { cloneFormModel, type FormModel, type FormValue } from "../schema/adapter"
+import { isAiToolkitSchema, moduleForTrainType } from "./modules"
+import { validateQwenConfig } from "./qwenValidation"
+import { cloneFormModel, hasFormValue, type FormModel, type FormValue } from "../schema/adapter"
 import { i18n } from "../i18n"
 import { parse } from "smol-toml"
 
@@ -32,16 +34,45 @@ export const CROSS_SCHEMA_DENY_KEYS = [
   "cache_latents_to_disk",
   "cache_text_encoder_outputs",
   "cache_text_encoder_outputs_to_disk",
+  // Engine-specific model asset paths: krea2/musubi `dit` must not leak into
+  // klein/ai-toolkit's DiT dir (and vice versa); kohya pages keep sharing
+  // pretrained_model_name_or_path among themselves.
+  "dit",
+  // krea2's text_encoder is Qwen3-VL; klein's is Qwen3 — never cross them.
+  "text_encoder",
+  "model_input_mode", "model_variant", "model_path", "model_config_dir", "dit_path", "text_encoder_path", "vae_path", "training_task", "control_data_dirs",
 ] as const
+
+/**
+ * Asset paths that are only unsafe across *model-family* pages (musubi/klein):
+ * Krea 2's Turbo DiT, Ideogram 4's asymmetric-CFG DiT and the fp8 pairing flags
+ * must not leak between those pages. Kohya pages legitimately share an external
+ * VAE and their own fp8 switches, so these stay out of the global deny list.
+ */
+const MODEL_ASSET_DENY_TRAIN_TYPES = new Set([
+  "krea2-lora", "ideogram4-lora", "klein-lora", "klein-4b-lora", "klein-9b-lora",
+])
+const MODEL_ASSET_DENY_KEYS = ["vae", "turbo_dit", "turbo_dit_cache", "unconditional_dit", "fp8_base", "fp8_scaled"] as const
+
+/** Deny set for a carry-over / autosave-sanitize boundary, keyed on the target page. */
+export function denyKeysForDefaults(defaults: FormModel): Set<string> {
+  const deny = new Set<string>(CROSS_SCHEMA_DENY_KEYS)
+  if (MODEL_ASSET_DENY_TRAIN_TYPES.has(String(defaults.model_train_type ?? ""))) {
+    for (const key of MODEL_ASSET_DENY_KEYS) deny.add(key)
+  }
+  return deny
+}
 
 /** schemaName → locked model_train_type for pages that own a single train type. */
 export const SCHEMA_TRAIN_TYPES: Record<string, string> = {
+  "qwen-image-21-lora": "qwen-image-21-lora",
   "anima-lora-fast": "anima-lora-fast",
   "sd3-lora": "anima-lora",
   "anima-finetune": "anima-finetune",
   "flux-lora": "flux-lora",
   "lumina2-lora": "lumina2-lora",
   "krea2-lora": "krea2-lora",
+  "ideogram4-lora": "ideogram4-lora",
 }
 
 export interface ParamDiagnostics {
@@ -55,7 +86,7 @@ export function pickCarryOverFields(
   defaults: FormModel,
   fieldDefaults?: FormModel,
 ): FormModel {
-  const deny = new Set<string>(CROSS_SCHEMA_DENY_KEYS)
+  const deny = denyKeysForDefaults(defaults)
   const carried: FormModel = {}
   for (const [key, value] of Object.entries(carry)) {
     if (deny.has(key)) continue
@@ -73,10 +104,12 @@ export function pickCarryOverFields(
 export function sanitizePersistedDraft(saved: FormModel, defaults: FormModel): FormModel {
   const draft = cloneFormModel(saved)
   const expected = defaults.model_train_type
+  const kleinTypes = ["klein-4b-lora", "klein-9b-lora"]
+  if (kleinTypes.includes(String(expected)) && kleinTypes.includes(String(draft.model_train_type))) return draft
   if (expected === undefined || draft.model_train_type === undefined || draft.model_train_type === expected) {
     return draft
   }
-  for (const key of CROSS_SCHEMA_DENY_KEYS) delete draft[key]
+  for (const key of denyKeysForDefaults(defaults)) delete draft[key]
   return draft
 }
 
@@ -92,6 +125,45 @@ export function buildTrainingConfig(source: FormModel, schemaName: string) {
   const config: FormModel = schemaName === "lora-basic" ? { ...BASIC_DEFAULTS, ...cloneFormModel(source) } : cloneFormModel(source)
   const lockedTrainType = SCHEMA_TRAIN_TYPES[schemaName]
   if (lockedTrainType) config.model_train_type = lockedTrainType
+  if (schemaName === "qwen-image-21-lora") {
+    // Keep Edit references in the draft while omitting them from T2I requests.
+    if (config.training_task !== "image-edit" && Array.isArray(config.preview_samples)) {
+      config.preview_samples = config.preview_samples.map(value => {
+        if (typeof value !== "string") return value
+        try {
+          const sample = JSON.parse(value)
+          if (sample && typeof sample === "object" && "controlImages" in sample) {
+            return JSON.stringify({ ...sample, controlImages: [] })
+          }
+        } catch { /* Preserve malformed samples for the existing validation path. */ }
+        return value
+      })
+    }
+    return config
+  }
+  if (isAiToolkitSchema(schemaName)) {
+    if (schemaName !== "klein-lora") config.model_train_type = schemaName
+    if (config.model_input_mode === "model_directory") delete config.dit_path
+    else delete config.model_path
+    if (config.training_task !== "image-edit") {
+      delete config.control_data_dirs
+      if (Array.isArray(config.preview_samples)) {
+        config.preview_samples = config.preview_samples.map(value => {
+          if (typeof value !== "string") return value
+          try { return JSON.stringify({ ...JSON.parse(value), controlImages: [] }) }
+          catch { return value }
+        })
+      }
+    }
+    if (!config.enable_preview) remove(config, [...PREVIEW_PARAMS, "preview_samples"])
+    if (typeof config.learning_rate === "string" && Number.isFinite(Number(config.learning_rate))) {
+      config.learning_rate = Number(config.learning_rate)
+    }
+    if (Array.isArray(config.gpu_ids)) {
+      config.gpu_ids = config.gpu_ids.map((value) => String(value).match(/GPU (\d+):/)?.[1] || String(value)).filter(Boolean)
+    }
+    return config
+  }
   let networkArgs: string[] = []
   let optimizerArgs: string[] = []
 
@@ -165,6 +237,49 @@ export function buildTrainingConfig(source: FormModel, schemaName: string) {
   return config
 }
 
+/** network_args key -> GUI field, mirroring mikazuki/utils/config_import._LYCORIS_NETWORK_ARG_TO_UI. */
+const LYCORIS_NETWORK_ARG_TO_UI: Record<string, string> = {
+  algo: "lycoris_algo",
+  factor: "lokr_factor",
+  conv_dim: "conv_dim",
+  conv_alpha: "conv_alpha",
+  dropout: "dropout",
+  module_dropout: "module_dropout",
+  unit: "dylora_unit",
+  use_cp: "use_cp",
+  use_scalar: "use_scalar",
+  decompose_both: "decompose_both",
+  bypass_mode: "bypass_mode",
+  dora_wd: "dora_wd",
+  full_matrix: "full_matrix",
+  rank_dropout: "rank_dropout",
+  rank_dropout_scale: "rank_dropout_scale",
+  train_norm: "train_norm",
+}
+const LYCORIS_BOOL_UI_FIELDS = new Set([
+  "use_cp", "use_scalar", "decompose_both", "bypass_mode", "dora_wd",
+  "full_matrix", "rank_dropout_scale", "train_norm",
+])
+
+/** Mirrors mikazuki/utils/config_import._is_invalid_import_scalar: never turn
+ *  an "undefined"/"null"/empty arg into a form value. */
+function isInvalidLycorisArgValue(raw: string) {
+  return ["", "undefined", "null", "nan"].includes(raw.trim().toLowerCase())
+}
+
+function coerceLycorisArgValue(raw: string, asBool: boolean): FormValue {
+  const value = raw.trim()
+  if (asBool) {
+    const lowered = value.toLowerCase()
+    if (["true", "1", "yes", "on"].includes(lowered)) return true
+    if (["false", "0", "no", "off"].includes(lowered)) return false
+    return value
+  }
+  if (/^-?\d+$/.test(value)) return Number.parseInt(value, 10)
+  const parsed = Number.parseFloat(value)
+  return Number.isNaN(parsed) ? value : parsed
+}
+
 export function hydrateImportedConfig(source: FormModel) {
   const config = cloneFormModel(source)
   for (const key of FLOAT_PARAMS) {
@@ -178,7 +293,14 @@ export function hydrateImportedConfig(source: FormModel) {
       const [key, ...rest] = String(raw).split("=")
       const value = rest.join("=")
       if (!key) continue
-      config[key === "algo" ? "lycoris_algo" : key] = value
+      const uiField = LYCORIS_NETWORK_ARG_TO_UI[key]
+      if (uiField) {
+        if (!isInvalidLycorisArgValue(value) && !hasFormValue(config[uiField])) {
+          config[uiField] = coerceLycorisArgValue(value, LYCORIS_BOOL_UI_FIELDS.has(uiField))
+        }
+        continue
+      }
+      config[key] = value
     }
     delete config.network_args
   }
@@ -191,7 +313,13 @@ export function hydrateImportedConfig(source: FormModel) {
 
 export function checkTrainingConfig(config: FormModel): ParamDiagnostics {
   const warnings: string[] = []
-  const errors: string[] = []
+  const errors: string[] = config.model_train_type === "qwen-image-21-lora" ? Object.values(validateQwenConfig(config)) : []
+  if (moduleForTrainType(config.model_train_type)?.engine === "ai-toolkit") {
+    const lr = config.learning_rate
+    if ((typeof lr !== "number" && typeof lr !== "string") || !Number.isFinite(Number(lr)) || Number(lr) < 1e-12) {
+      errors.push(i18n.global.t("training.diagnostics.toolkitLearningRate"))
+    }
+  }
   const optimizer = String(config.optimizer_type || "")
   if (optimizer.startsWith("DAdapt") && config.lr_scheduler !== "constant") warnings.push(i18n.global.t("training.diagnostics.dadaptScheduler"))
   if (optimizer.toLowerCase().startsWith("prodigy") && (config.unet_lr !== 1 || config.text_encoder_lr !== 1)) warnings.push(i18n.global.t("training.diagnostics.prodigyLr"))

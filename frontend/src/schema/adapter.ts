@@ -1,3 +1,4 @@
+import { validateQwenConfig } from "../training/qwenValidation"
 import Schema from "schemastery"
 import { i18n } from "../i18n"
 import type { SchemaSource } from "../api/schemas"
@@ -99,6 +100,13 @@ function description(meta: Schema["meta"] | undefined) {
   return meta?.description?.["zh-CN"] || meta?.description?.[""]
 }
 
+function explicitDefault(schema: SchemaRecord) {
+  if (!Object.prototype.hasOwnProperty.call(schema.meta ?? {}, "default")) return undefined
+  const value = schema.meta.default as FormValue
+  if (schema.type === "array" && Array.isArray(value) && value.length === 0) return undefined
+  return value
+}
+
 function conditionsFrom(schema: SchemaRecord): FormCondition[] {
   if (schema.type === "object") {
     return Object.entries(schema.dict ?? {})
@@ -114,8 +122,10 @@ function fieldFrom(key: string, schema: SchemaRecord, conditions: FormCondition[
     return {
       key,
       type: "string",
+      role: schema.meta.role,
+      extra: schema.meta.extra,
       description: description(schema.meta),
-      defaultValue: schema.meta.default as FormValue,
+      defaultValue: explicitDefault(schema),
       required: schema.meta.required,
       hidden: schema.meta.hidden,
       disabled: schema.meta.disabled,
@@ -130,7 +140,7 @@ function fieldFrom(key: string, schema: SchemaRecord, conditions: FormCondition[
     description: description(schema.meta),
     role: schema.meta.role,
     extra: schema.meta.extra,
-    defaultValue: (schema.meta.default ?? (schema.type === "array" ? [] : undefined)) as FormValue,
+    defaultValue: explicitDefault(schema),
     constValue: schema.value,
     required: schema.meta.required,
     hidden: schema.meta.hidden,
@@ -190,6 +200,52 @@ export function isFieldActive(field: FormField, model: FormModel) {
   return field.conditions.every((condition) => model[condition.key] === condition.value)
 }
 
+export function isAnimaFastTorchCompileBlocked(schema: AdaptedSchema, model: FormModel) {
+  if (schema.name !== "anima-lora-fast") return false
+  const attnMode = String(model.attn_mode ?? "").trim().toLowerCase()
+  return attnMode === "" || attnMode === "torch"
+}
+
+export interface NormalizeModelOptions {
+  explicitKeys?: ReadonlySet<string>
+}
+
+export function hasFormValue(value: unknown) {
+  if (value === undefined || value === null) return false
+  if (typeof value === "string" && ["", "undefined", "null", "nan"].includes(value.trim().toLowerCase())) return false
+  return !Array.isArray(value) || value.length > 0
+}
+
+function fieldDefault(schema: AdaptedSchema, key: string) {
+  const field = schema.sections.flatMap((section) => section.fields).find((item) => item.key === key && item.defaultValue !== undefined)
+  return field?.defaultValue
+}
+
+export function normalizeModelForSchema(schema: AdaptedSchema, model: FormModel, options: NormalizeModelOptions = {}) {
+  const normalized = cloneFormModel(model)
+  if (schema.name === "anima-lora-fast") {
+    const explicitMode = options.explicitKeys?.has("training_duration_mode")
+      && (normalized.training_duration_mode === "epoch" || normalized.training_duration_mode === "steps")
+      ? normalized.training_duration_mode
+      : undefined
+    const hasExplicitEpochs = (options.explicitKeys?.has("max_train_epochs") ?? false) && hasFormValue(normalized.max_train_epochs)
+    const hasExplicitSteps = (options.explicitKeys?.has("max_train_steps") ?? false) && hasFormValue(normalized.max_train_steps)
+    const durationMode = options.explicitKeys
+      ? explicitMode ?? (hasExplicitSteps && !hasExplicitEpochs ? "steps" : "epoch")
+      : normalized.training_duration_mode === "steps" ? "steps" : "epoch"
+    normalized.training_duration_mode = durationMode
+    const activeKey = durationMode === "steps" ? "max_train_steps" : "max_train_epochs"
+    const inactiveKey = durationMode === "steps" ? "max_train_epochs" : "max_train_steps"
+    delete normalized[inactiveKey]
+    if (!hasFormValue(normalized[activeKey])) {
+      const defaultValue = fieldDefault(schema, activeKey)
+      if (defaultValue !== undefined) normalized[activeKey] = cloneFormValue(defaultValue)
+    }
+  }
+  if (isAnimaFastTorchCompileBlocked(schema, normalized)) normalized.torch_compile = false
+  return normalized
+}
+
 export function createDefaultModel(schema: AdaptedSchema): FormModel {
   const model: FormModel = {}
   for (const field of schema.sections.flatMap((section) => section.fields)) {
@@ -203,13 +259,35 @@ export function createDefaultModel(schema: AdaptedSchema): FormModel {
 // always match the active schema; carry-over/autosave from another module may
 // otherwise leak a foreign value in (e.g. anima-lora into the krea2 page).
 export function applyReadonlyDefaults(schema: AdaptedSchema, model: FormModel, defaults: FormModel) {
-  const seen = new Set<string>()
+  const groups = new Map<string, FormField[]>()
   for (const field of schema.sections.flatMap((section) => section.fields)) {
-    if (seen.has(field.key)) continue
-    seen.add(field.key)
-    if (!(field.disabled || field.hidden || field.type === "const")) continue
-    const value = defaults[field.key]
-    if (value !== undefined) model[field.key] = cloneFormValue(value)
+    const list = groups.get(field.key)
+    if (list) list.push(field)
+    else groups.set(field.key, [field])
+  }
+  for (const [key, candidates] of groups) {
+    // A hidden field controlled elsewhere in the UI is user state, not a lock.
+    // Missing values use defaults; invalid explicit values remain for validation.
+    const externalControl = candidates.find((field) => field.hidden && field.role === "external-control" && !field.disabled && field.type !== "const")
+    if (externalControl) {
+      if (model[key] === undefined && defaults[key] !== undefined) model[key] = cloneFormValue(defaults[key])
+      continue
+    }
+    const forceable = candidates.filter((field) => field.disabled || field.hidden || field.type === "const")
+    const active = candidates.find((candidate) => isFieldActive(candidate, model))
+    // Only an *active readonly* instance may force a value. Union branches repeat
+    // keys under different conditions (sd3-lora's LoRA branch hides lokr_factor /
+    // network_module / lycoris_algo), and the first instance in field order is not
+    // necessarily the active one — forcing it reset imported or autosaved LoKr
+    // settings back to the LoRA branch defaults.
+    // An active *visible* instance means the key is user state (lokr_factor on the
+    // LoKr branch) and must be left alone; with no active instance at all
+    // (foreign/unknown discriminator value) fall back to the first readonly
+    // instance so a foreign value cannot survive in the form model.
+    const field = active ? (forceable.includes(active) ? active : undefined) : forceable[0]
+    if (!field) continue
+    const value = field.type === "const" ? field.constValue : (field.defaultValue ?? defaults[key])
+    if (value !== undefined) model[key] = cloneFormValue(value)
   }
 }
 
@@ -217,6 +295,10 @@ export function serializeModel(schema: AdaptedSchema, model: FormModel) {
   const output: FormModel = {}
   for (const field of schema.sections.flatMap((section) => section.fields)) {
     if (!isFieldActive(field, model)) continue
+    if (field.key === "torch_compile" && isAnimaFastTorchCompileBlocked(schema, model)) {
+      output[field.key] = false
+      continue
+    }
     const value = field.type === "const" ? field.constValue : model[field.key]
     if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) continue
     output[field.key] = cloneFormValue(value)
@@ -237,5 +319,9 @@ export function validateModel(schema: AdaptedSchema, model: FormModel) {
       errors[field.key] = i18n.global.t("schema.tooLarge", { max: field.max })
     }
   }
+  if (isAnimaFastTorchCompileBlocked(schema, model) && model.torch_compile === true) {
+    errors.torch_compile = i18n.global.t("training.diagnostics.animaFastTorchCompile")
+  }
+  if (schema.name === "qwen-image-21-lora") Object.assign(errors, validateQwenConfig(model))
   return errors
 }

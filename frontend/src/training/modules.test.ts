@@ -14,6 +14,17 @@ import {
 } from "./modules"
 
 describe("training module mapping", () => {
+  it("accepts the legacy Qwen-Image 2.1 URL spelling", () => {
+    expect(normalizeModel("qwen-image-2.1")).toBe("qwen-image-21")
+  })
+
+  it("exposes only Qwen-Image-2.1 LoRA for DiffSynth", () => {
+    expect(resolveModule("qwen-image-21", "diffsynth", "lora")?.schemaName).toBe("qwen-image-21-lora")
+    expect(resolveModule("qwen-image-21", "diffsynth", "finetune")).toBeUndefined()
+    for (const model of TRAINING_MODELS) {
+      if (model !== "qwen-image-21") expect(isEngineSupported(model, "diffsynth")).toBe(false)
+    }
+  })
   it("resolves every v1 minimal mapping", () => {
     expect(resolveModule("anima", "kohya", "lora")?.schemaName).toBe("sd3-lora")
     expect(resolveModule("anima", "anima-fast", "lora")?.schemaName).toBe("anima-lora-fast")
@@ -67,11 +78,32 @@ describe("training module mapping", () => {
     expect(resolveModule("anima", "musubi", "lora")).toBeUndefined()
   })
 
-  it("limits musubi engine to the krea2 model", () => {
+  it("limits musubi engine to the krea2 and ideogram4 models", () => {
     expect(isEngineSupported("krea2", "musubi")).toBe(true)
+    expect(isEngineSupported("ideogram4", "musubi")).toBe(true)
+    expect(resolveModule("krea2", "musubi", "lora")?.schemaName).toBe("krea2-lora")
+    expect(resolveModule("ideogram4", "musubi", "lora")?.schemaName).toBe("ideogram4-lora")
     for (const model of TRAINING_MODELS) {
-      if (model === "krea2") continue
+      if (model === "krea2" || model === "ideogram4") continue
       expect(isEngineSupported(model, "musubi")).toBe(false)
+    }
+  })
+
+  it("exposes the supported ai-toolkit model families as LoRA modules", () => {
+    const schemas: Record<string, string> = {
+      klein: "klein-lora",
+      sdxl: "ai-toolkit-sdxl-lora",
+      sd15: "ai-toolkit-sd15-lora",
+      ideogram4: "ai-toolkit-ideogram4-lora",
+      flux: "ai-toolkit-flux-lora",
+      krea2: "ai-toolkit-krea2-lora",
+      anima: "ai-toolkit-anima-lora",
+      "qwen-image-21": "ai-toolkit-qwen-image-21-lora",
+    }
+    for (const model of TRAINING_MODELS) {
+      expect(isEngineSupported(model, "ai-toolkit")).toBe(model in schemas)
+      expect(resolveModule(model, "ai-toolkit", "lora")?.schemaName).toBe(schemas[model])
+      expect(resolveModule(model, "ai-toolkit", "finetune")).toBeUndefined()
     }
   })
 

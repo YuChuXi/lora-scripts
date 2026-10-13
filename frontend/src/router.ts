@@ -10,6 +10,8 @@ const TrainingWorkbenchPage = () => import("./pages/TrainingWorkbenchPage.vue")
 const SettingsContainerPage = () => import("./pages/SettingsContainerPage.vue")
 const GuidePage = () => import("./pages/GuidePage.vue")
 const ParamsPage = () => import("./pages/ParamsPage.vue")
+const GenericArtifactDetailPage = () => import("./components/extensions/GenericArtifactDetailPage.vue")
+const GenericPluginSettingsPage = () => import("./components/extensions/GenericPluginSettingsPage.vue")
 
 const trainingQuery = (model: string, engine: string, target: string) => ({
   path: "/training",
@@ -19,16 +21,27 @@ const trainingQuery = (model: string, engine: string, target: string) => ({
 const routes: RouteRecordRaw[] = [
   { path: "/", component: HomePage, meta: { titleKey: "app.brand" } },
   { path: "/training", component: TrainingWorkbenchPage, meta: { titleKey: "training.title" } },
-  { path: "/dataset", redirect: "/dataset/tagger" },
+  { path: "/dataset", redirect: "/dataset/manage" },
+  { path: "/dataset/manage", component: DatasetPage, props: { tab: "manage" }, meta: { titleKey: "dataset.title" } },
   { path: "/dataset/editor", component: DatasetPage, props: { tab: "editor" }, meta: { titleKey: "dataset.title" } },
   { path: "/dataset/tagger", component: DatasetPage, props: { tab: "tagger" }, meta: { titleKey: "dataset.title" } },
   { path: "/tasks", component: TasksPage, meta: { titleKey: "tasks.title" } },
   { path: "/settings", redirect: "/settings/ui" },
   { path: "/settings/ui", component: SettingsContainerPage, props: { tab: "ui" }, meta: { titleKey: "settings.title" } },
+  { path: "/settings/api", component: SettingsContainerPage, props: { tab: "api" }, meta: { titleKey: "settings.title" } },
   { path: "/settings/engines", component: SettingsContainerPage, props: { tab: "engines" }, meta: { titleKey: "settings.title" } },
-  { path: "/settings/update", component: SettingsContainerPage, props: { tab: "update" }, meta: { titleKey: "settings.title" } },
+  { path: "/settings/advanced", component: SettingsContainerPage, props: { tab: "advanced" }, meta: { titleKey: "settings.title" } },
+  // Update and changelog now live inside the About tab.
+  { path: "/settings/update", redirect: "/settings/about" },
+  { path: "/settings/changelog", redirect: "/settings/about" },
+  { path: "/settings/plugins", component: SettingsContainerPage, props: { tab: "plugins" }, meta: { titleKey: "marketplace.title" } },
+  {
+    path: "/settings/plugins/:pluginId",
+    name: "plugin-settings",
+    component: GenericPluginSettingsPage,
+    meta: { titleKey: "extensionHost.settings.title" },
+  },
   { path: "/settings/about", component: SettingsContainerPage, props: { tab: "about" }, meta: { titleKey: "settings.title" } },
-  { path: "/settings/changelog", component: SettingsContainerPage, props: { tab: "changelog" }, meta: { titleKey: "settings.title" } },
   { path: "/help/guide.html", component: GuidePage, meta: { titleKey: "guide.title" } },
   // 旧 URL → 新 IA redirect
   { path: "/lora/index.html", redirect: "/training" },
@@ -42,10 +55,14 @@ const routes: RouteRecordRaw[] = [
   { path: "/lora/anima-finetune.html", redirect: () => trainingQuery("anima", "kohya", "finetune") },
   { path: "/lora/krea2.html", redirect: () => trainingQuery("krea2", "musubi", "lora") },
   { path: "/lora/krea2", redirect: () => trainingQuery("krea2", "musubi", "lora") },
+  { path: "/lora/ideogram4.html", redirect: () => trainingQuery("ideogram4", "musubi", "lora") },
+  { path: "/lora/ideogram4", redirect: () => trainingQuery("ideogram4", "musubi", "lora") },
+  { path: "/lora/klein", redirect: () => trainingQuery("klein", "ai-toolkit", "lora") },
   { path: "/dreambooth/index.html", redirect: () => trainingQuery("sdxl", "kohya", "finetune") },
   { path: "/tagger.html", redirect: "/dataset/tagger" },
   { path: "/native-tageditor.html", redirect: "/dataset/editor" },
   { path: "/dataset-editor.html", redirect: "/dataset/editor" },
+  { path: "/tageditor.html", redirect: "/dataset/editor" },
   { path: "/task.html", redirect: "/tasks" },
   { path: "/other/settings.html", redirect: "/settings/ui" },
   { path: "/other/about.html", redirect: "/settings/about" },
@@ -60,10 +77,10 @@ const routes: RouteRecordRaw[] = [
   { path: "/lora/tools.html", component: ToolsPage, meta: { titleKey: "tools.title" } },
   { path: "/lora/params.html", component: ParamsPage, meta: { titleKey: "paramsPage.title" } },
   {
-    path: "/tageditor.html",
-    component: IntegrationPage,
-    props: { titleKey: "integration.legacyTagEditor", src: "/proxy/tageditor/" },
-    meta: { titleKey: "integration.legacyTagEditor" },
+    path: "/plugins/:pluginId/artifacts/:artifactId",
+    name: "plugin-artifact-detail",
+    component: GenericArtifactDetailPage,
+    meta: { titleKey: "extensionHost.artifact.title" },
   },
   { path: "/:pathMatch(.*)*", component: NotFoundPage, meta: { titleKey: "notFound.title" } },
 ]

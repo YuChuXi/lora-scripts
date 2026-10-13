@@ -5,8 +5,10 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from mikazuki.anima_fast_backend.adapter import (
+from mikazuki.engines.anima_fast import preflight as preflight_module
+from mikazuki.engines.anima_fast.adapter import (
     AdapterError,
     adapt_config,
     dataset_cache_slug,
@@ -14,7 +16,7 @@ from mikazuki.anima_fast_backend.adapter import (
     dump_fast_dataset_toml,
     ensure_fast_run_log_dirs,
 )
-from mikazuki.anima_fast_backend.extension_state import (
+from mikazuki.engines.anima_fast.extension_state import (
     STATE_BROKEN,
     STATE_INSTALLED_UNVERIFIED,
     STATE_NOT_INSTALLED,
@@ -23,11 +25,11 @@ from mikazuki.anima_fast_backend.extension_state import (
     read_extension_status,
     write_install_state,
 )
-from mikazuki.anima_fast_backend.installer import build_install_plan, copy_source_snapshot, remove_extension
-from mikazuki.anima_fast_backend.launcher import build_launch_spec
-from mikazuki.anima_fast_backend.preflight import ProbeFacts, run_preflight
-from mikazuki.anima_fast_backend.service_resolver import LegacyServiceResolverShim, RegistryServiceResolver
-from mikazuki.anima_fast_backend.settings import RuntimeConfig
+from mikazuki.engines.anima_fast.installer import build_install_plan, copy_source_snapshot, remove_extension
+from mikazuki.engines.anima_fast.launcher import build_launch_spec
+from mikazuki.engines.anima_fast.preflight import ProbeFacts, probe_dit_checkpoint, run_preflight
+from mikazuki.engines.anima_fast.service_resolver import LegacyServiceResolverShim, RegistryServiceResolver
+from mikazuki.engines.anima_fast.settings import RuntimeConfig
 
 
 def make_runtime(root: Path) -> RuntimeConfig:
@@ -46,6 +48,76 @@ def make_runtime(root: Path) -> RuntimeConfig:
         output_dir=root / "output" / "anima_fast",
         logging_dir=root / "logs" / "anima_fast",
         cache_dir=root / ".cache" / "anima_fast",
+    )
+
+
+def save_anima_model(path: Path, blocks: int = 28) -> None:
+    import torch
+    from safetensors.torch import save_file
+
+    save_file(
+        {
+            "net.x_embedder.proj.1.weight": torch.zeros((2048, 1)),
+            **{
+                f"net.blocks.{index}.marker": torch.zeros(1)
+                for index in range(blocks)
+            },
+        },
+        path,
+    )
+
+
+def save_minimal_resume_state(path: Path) -> None:
+    import torch
+    from safetensors.torch import save_file
+
+    path.mkdir()
+    save_file({"state.weight": torch.zeros(1)}, path / "model.safetensors")
+    (path / "optimizer.bin").write_bytes(b"optimizer-state")
+    (path / "scheduler.bin").write_bytes(b"scheduler-state")
+    (path / "train_state.json").write_text(
+        json.dumps({"current_epoch": 1, "current_step": 28}),
+        encoding="utf-8",
+    )
+
+
+def write_png(path: Path, width: int = 64, height: int = 64) -> None:
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.new("RGB", (width, height)) as image:
+        image.save(path, format="PNG")
+
+
+def save_latent_npz(path: Path, width: int, height: int) -> None:
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    key = f"{height // 8}x{width // 8}"
+    np.savez(
+        path,
+        **{
+            f"latents_{key}": np.zeros((16, 1, height // 8, width // 8)),
+            f"original_size_{key}": np.zeros((2,)),
+            f"crop_ltrb_{key}": np.zeros((4,)),
+        },
+    )
+
+
+def save_text_cache(path: Path) -> None:
+    import torch
+    from safetensors.torch import save_file
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_file(
+        {
+            "caption_dropout_rate": torch.zeros(1),
+            "prompt_embeds": torch.zeros(1),
+            "attn_mask": torch.zeros(1),
+            "t5_input_ids": torch.zeros(1),
+            "t5_attn_mask": torch.zeros(1),
+        },
+        path,
     )
 
 
@@ -80,8 +152,8 @@ class ExtensionStateTests(unittest.TestCase):
         layout.train_py.write_text("", encoding="utf-8")
         (layout.source / "configs").mkdir()
         (layout.source / "configs" / "base.toml").write_text("", encoding="utf-8")
-        (layout.source / "preprocess").mkdir()
-        (layout.source / "preprocess" / "resize_images.py").write_text("", encoding="utf-8")
+        (layout.source / "scripts" / "preprocess").mkdir(parents=True)
+        (layout.source / "scripts" / "preprocess" / "resize_images.py").write_text("", encoding="utf-8")
 
     def test_status_transitions(self):
         with tempfile.TemporaryDirectory() as td:
@@ -112,7 +184,7 @@ class ExtensionStateTests(unittest.TestCase):
 
         self.assertEqual(status.state, STATE_BROKEN)
         self.assertIn("configs/base.toml", status.reason)
-        self.assertIn("preprocess/resize_images.py", status.reason)
+        self.assertIn("scripts/preprocess/resize_images.py", status.reason)
 
 
 class InstallerTests(unittest.TestCase):
@@ -199,6 +271,147 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(adapted.values["network_args"], ["rank_dropout=0.1"])
         self.assertIn('method = "lora"', dump_flat_toml(adapted.values))
 
+    def test_fast_variant_defaults_to_lora(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({}, runtime, "run-1")
+
+        self.assertEqual(adapted.values["method"], "lora")
+        self.assertEqual(adapted.values["network_module"], "networks.lora_anima")
+        self.assertNotIn("down_init", adapted.values)
+        self.assertNotIn("use_timestep_mask=true", adapted.values.get("network_args", []))
+
+    def test_adapt_config_passes_network_train_unet_only_through(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config(
+                {
+                    "model_train_type": "anima-lora-fast",
+                    "network_train_unet_only": False,
+                },
+                runtime,
+                "run-1",
+            )
+
+        self.assertIs(adapted.values["network_train_unet_only"], False)
+        self.assertIn("network_train_unet_only = false", dump_flat_toml(adapted.values))
+
+    def test_adapt_config_disables_text_cache_when_training_text_encoder(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config(
+                {
+                    "model_train_type": "anima-lora-fast",
+                    "network_train_unet_only": False,
+                    "use_text_cache": True,
+                },
+                runtime,
+                "run-1",
+            )
+
+        self.assertIs(adapted.values["use_text_cache"], False)
+        self.assertTrue(any("network_train_unet_only" in w for w in adapted.warnings))
+
+    def test_adapt_config_keeps_text_cache_when_unet_only_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config(
+                {
+                    "model_train_type": "anima-lora-fast",
+                    "use_text_cache": True,
+                },
+                runtime,
+                "run-1",
+            )
+
+        self.assertIs(adapted.values["use_text_cache"], True)
+
+    def test_tlora_variant_injects_curated_upstream_flags(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config(
+                {
+                    "fast_variant": "tlora",
+                    "down_init": "gaussian",
+                    "network_args_custom": [
+                        "rank_dropout=0.1",
+                        "use_timestep_mask=false",
+                        "min_rank=8",
+                        "alpha_rank_scale=0.25",
+                    ],
+                },
+                runtime,
+                "run-1",
+            )
+
+        self.assertEqual(adapted.values["method"], "lora")
+        self.assertEqual(adapted.values["network_module"], "networks.lora_anima")
+        self.assertEqual(adapted.values["down_init"], "weight_svd")
+        self.assertIn("rank_dropout=0.1", adapted.values["network_args"])
+        self.assertIn("use_timestep_mask=true", adapted.values["network_args"])
+        self.assertIn("min_rank=1", adapted.values["network_args"])
+        self.assertIn("alpha_rank_scale=1.0", adapted.values["network_args"])
+        self.assertNotIn("use_timestep_mask=false", adapted.values["network_args"])
+        self.assertNotIn("min_rank=8", adapted.values["network_args"])
+        self.assertNotIn("alpha_rank_scale=0.25", adapted.values["network_args"])
+
+    def test_tlora_variant_rejects_text_encoder_training(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            with self.assertRaisesRegex(
+                AdapterError,
+                "fast_variant=tlora.*network_train_unet_only=false",
+            ):
+                adapt_config(
+                    {
+                        "fast_variant": "tlora",
+                        "network_train_unet_only": False,
+                    },
+                    runtime,
+                    "run-1",
+                )
+
+    def test_unknown_fast_variant_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            with self.assertRaisesRegex(AdapterError, "fast_variant=turbo"):
+                adapt_config({"fast_variant": "turbo"}, runtime, "run-1")
+
+    def test_lora_variant_rejects_custom_tlora_network_args(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            with self.assertRaisesRegex(AdapterError, "use_timestep_mask"):
+                adapt_config(
+                    {
+                        "fast_variant": "lora",
+                        "network_args_custom": ["use_timestep_mask=true"],
+                    },
+                    runtime,
+                    "run-1",
+                )
+
+    def test_lora_variant_ignores_top_level_tlora_bypass_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config(
+                {
+                    "fast_variant": "lora",
+                    "method": "turbo",
+                    "use_timestep_mask": True,
+                    "min_rank": 8,
+                    "alpha_rank_scale": 0.25,
+                    "down_init": "weight_svd",
+                },
+                runtime,
+                "run-1",
+            )
+
+        self.assertEqual(adapted.values["method"], "lora")
+        self.assertNotIn("use_timestep_mask", adapted.values)
+        self.assertNotIn("min_rank", adapted.values)
+        self.assertNotIn("alpha_rank_scale", adapted.values)
+        self.assertNotIn("down_init", adapted.values)
+
     def test_adapt_config_uses_stable_dataset_cache_paths(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -250,10 +463,34 @@ class AdapterTests(unittest.TestCase):
         )
 
         self.assertIn("[[datasets]]", text)
-        self.assertIn("resolution = [1024, 1024]", text)
+        self.assertNotIn("keep_tokens", text)
+        self.assertNotIn("resolution =", text)
+        self.assertNotIn("enable_bucket", text)
+        self.assertNotIn("bucket_reso", text)
         self.assertIn("batch_size = 4", text)
         self.assertIn("[[datasets.subsets]]", text)
         self.assertIn("num_repeats = 7", text)
+
+    def test_dump_fast_dataset_toml_defaults_to_no_validation_split(self):
+        text = dump_fast_dataset_toml(
+            {
+                "resized_image_dir": "D:/data/resized",
+                "lora_cache_dir": "D:/data/lora",
+            }
+        )
+
+        self.assertIn("validation_split_num = 0", text)
+
+    def test_dump_fast_dataset_toml_respects_explicit_validation_split_num(self):
+        text = dump_fast_dataset_toml(
+            {
+                "resized_image_dir": "D:/data/resized",
+                "lora_cache_dir": "D:/data/lora",
+                "validation_split_num": 8,
+            }
+        )
+
+        self.assertIn("validation_split_num = 8", text)
 
     def test_dataset_cache_slug_from_relative_path(self):
         with tempfile.TemporaryDirectory() as td:
@@ -261,16 +498,86 @@ class AdapterTests(unittest.TestCase):
             slug = dataset_cache_slug(root / "data" / "train_data", root)
         self.assertEqual(slug, "data_train_data")
 
-    def test_adapt_config_warns_when_epochs_override_steps(self):
+    def test_adapt_config_explicit_steps_removes_epochs(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({
+                "lora_type": "lora",
+                "training_duration_mode": "steps",
+                "max_train_epochs": 1,
+                "max_train_steps": 100,
+            }, runtime, "run-1")
+
+        self.assertEqual(adapted.values["max_train_steps"], 100)
+        self.assertNotIn("max_train_epochs", adapted.values)
+
+    def test_adapt_config_explicit_steps_defaults_steps_when_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({
+                "lora_type": "lora",
+                "training_duration_mode": "steps",
+                "max_train_epochs": 1,
+            }, runtime, "run-1")
+
+        self.assertEqual(adapted.values["max_train_steps"], 100)
+        self.assertNotIn("max_train_epochs", adapted.values)
+
+    def test_adapt_config_explicit_epoch_removes_steps(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({
+                "lora_type": "lora",
+                "training_duration_mode": "epoch",
+                "max_train_epochs": 2,
+                "max_train_steps": 100,
+            }, runtime, "run-1")
+
+        self.assertEqual(adapted.values["max_train_epochs"], 2)
+        self.assertNotIn("max_train_steps", adapted.values)
+
+    def test_adapt_config_legacy_step_only_remains_step_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({
+                "lora_type": "lora",
+                "max_train_steps": 100,
+            }, runtime, "run-1")
+
+        self.assertEqual(adapted.values["max_train_steps"], 100)
+        self.assertNotIn("max_train_epochs", adapted.values)
+
+    def test_adapt_config_legacy_both_chooses_epoch_and_warns(self):
         with tempfile.TemporaryDirectory() as td:
             runtime = make_runtime(Path(td))
             adapted = adapt_config({
                 "lora_type": "lora",
                 "max_train_epochs": 1,
-                "max_train_steps": 1,
+                "max_train_steps": 100,
             }, runtime, "run-1")
 
+        self.assertEqual(adapted.values["max_train_epochs"], 1)
+        self.assertNotIn("max_train_steps", adapted.values)
         self.assertTrue(any("max_train_epochs is set" in warning for warning in adapted.warnings))
+
+    def test_adapt_config_defaults_optimizer_to_adamw(self):
+        for optimizer_type in (None, "", "null", "undefined", "nan"):
+            with self.subTest(optimizer_type=optimizer_type), tempfile.TemporaryDirectory() as td:
+                runtime = make_runtime(Path(td))
+                adapted = adapt_config({
+                    "lora_type": "lora",
+                    "optimizer_type": optimizer_type,
+                }, runtime, "run-1")
+
+                self.assertEqual(adapted.values["optimizer_type"], "AdamW")
+
+    def test_adapt_config_defaults_duration_to_one_epoch(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({"lora_type": "lora"}, runtime, "run-1")
+
+        self.assertEqual(adapted.values["max_train_epochs"], 1)
+        self.assertNotIn("max_train_steps", adapted.values)
 
     def test_adapt_config_uses_torch_when_attn_mode_is_empty(self):
         with tempfile.TemporaryDirectory() as td:
@@ -278,23 +585,102 @@ class AdapterTests(unittest.TestCase):
             adapted = adapt_config({
                 "lora_type": "lora",
                 "attn_mode": "",
+                "torch_compile": False,
             }, runtime, "run-1")
 
         self.assertEqual(adapted.values["attn_mode"], "torch")
         self.assertTrue(any("attn_mode" in warning for warning in adapted.warnings))
 
-    def test_adapt_config_raises_static_token_count_for_high_resolution_compile(self):
+    def test_adapt_config_rejects_torch_attention_with_compile(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+
+            with self.assertRaisesRegex(AdapterError, r"attn_mode=torch.*torch_compile"):
+                adapt_config(
+                    {
+                        "attn_mode": "torch",
+                        "torch_compile": True,
+                        "compile_dynamic_seq": True,
+                    },
+                    runtime,
+                    "run-1",
+                )
+
+    def test_adapt_config_allows_torch_attention_without_compile(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config(
+                {
+                    "attn_mode": "torch",
+                    "torch_compile": False,
+                },
+                runtime,
+                "run-1",
+            )
+
+        self.assertEqual(adapted.values["attn_mode"], "torch")
+        self.assertFalse(adapted.values["torch_compile"])
+
+    def test_adapt_config_defaults_torch_compile_to_false(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config({"attn_mode": "flash"}, runtime, "run-1")
+
+        self.assertFalse(adapted.values["torch_compile"])
+
+    def test_adapt_config_ignores_empty_torch_compile_values(self):
+        for empty_value in (None, "", "null"):
+            with self.subTest(empty_value=empty_value), tempfile.TemporaryDirectory() as td:
+                runtime = make_runtime(Path(td))
+                adapted = adapt_config(
+                    {
+                        "attn_mode": "torch",
+                        "torch_compile": empty_value,
+                    },
+                    runtime,
+                    "run-1",
+                )
+
+                self.assertFalse(adapted.values["torch_compile"])
+
+    def test_adapt_config_ignores_v117_removed_fields(self):
         with tempfile.TemporaryDirectory() as td:
             runtime = make_runtime(Path(td))
             adapted = adapt_config({
                 "lora_type": "lora",
                 "resolution": "1536,1536",
                 "torch_compile": True,
+                "attn_mode": "flash",
                 "static_token_count": 4096,
+                "compile_mode": "full",
+                "dynamo_backend": "eager",
             }, runtime, "run-1")
 
-        self.assertEqual(adapted.values["static_token_count"], 9216)
-        self.assertTrue(any("static_token_count" in warning for warning in adapted.warnings))
+        for field in ("static_token_count", "compile_mode", "dynamo_backend"):
+            self.assertNotIn(field, adapted.values)
+            self.assertTrue(any(field in warning for warning in adapted.warnings))
+
+    def test_adapt_config_supports_dynamic_compile_and_migrates_legacy_cache_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = make_runtime(Path(td))
+            adapted = adapt_config(
+                {
+                    "torch_compile": True,
+                    "compile_dynamic_seq": False,
+                    "attn_mode": "flash",
+                    "cache_latents": True,
+                    "cache_text_encoder_outputs": True,
+                },
+                runtime,
+                "run-1",
+            )
+
+        self.assertTrue(adapted.values["compile_dynamic_seq"])
+        self.assertTrue(adapted.values["use_vae_cache"])
+        self.assertTrue(adapted.values["use_text_cache"])
+        self.assertNotIn("cache_latents", adapted.values)
+        self.assertNotIn("cache_text_encoder_outputs", adapted.values)
+        self.assertTrue(any("compile_dynamic_seq" in warning for warning in adapted.warnings))
 
     def test_adapt_config_derives_max_bucket_reso_for_high_resolution(self):
         with tempfile.TemporaryDirectory() as td:
@@ -307,7 +693,7 @@ class AdapterTests(unittest.TestCase):
 
         self.assertEqual(adapted.values["max_bucket_reso"], 1536)
         self.assertTrue(any("max_bucket_reso" in warning for warning in adapted.warnings))
-        self.assertIn("max_bucket_reso = 1536", dump_fast_dataset_toml(adapted.values))
+        self.assertNotIn("max_bucket_reso", dump_fast_dataset_toml(adapted.values))
 
     def test_adapt_config_preserves_valid_user_max_bucket_reso(self):
         with tempfile.TemporaryDirectory() as td:
@@ -388,13 +774,11 @@ class AdapterTests(unittest.TestCase):
                 "cache_text_encoder_outputs_to_disk": True,
             }, runtime, "run-1")
 
-        self.assertFalse(adapted.values["cache_latents"])
-        self.assertFalse(adapted.values["cache_latents_to_disk"])
-        self.assertFalse(adapted.values["cache_text_encoder_outputs"])
-        self.assertFalse(adapted.values["cache_text_encoder_outputs_to_disk"])
+        self.assertFalse(adapted.values["use_vae_cache"])
+        self.assertFalse(adapted.values["use_text_cache"])
         toml_text = dump_flat_toml(adapted.values)
-        self.assertIn("cache_latents_to_disk = false", toml_text)
-        self.assertIn("cache_text_encoder_outputs_to_disk = false", toml_text)
+        self.assertIn("use_vae_cache = false", toml_text)
+        self.assertIn("use_text_cache = false", toml_text)
 
     def test_adapt_config_uses_short_fast_log_defaults(self):
         with tempfile.TemporaryDirectory() as td:
@@ -421,7 +805,7 @@ class AdapterTests(unittest.TestCase):
             self.assertGreaterEqual(len(created), 4)
             self.assertTrue(any(path.name == "network_train" for path in created))
 
-    def test_adapt_config_disables_cache_when_skip_cache_check_is_combined(self):
+    def test_adapt_config_preserves_cache_flags_with_skip_cache_check(self):
         with tempfile.TemporaryDirectory() as td:
             runtime = make_runtime(Path(td))
             adapted = adapt_config({
@@ -431,10 +815,8 @@ class AdapterTests(unittest.TestCase):
                 "skip_cache_check": True,
             }, runtime, "run-1")
 
-        self.assertFalse(adapted.values["cache_latents"])
-        self.assertFalse(adapted.values["cache_latents_to_disk"])
-        self.assertFalse(adapted.values["cache_text_encoder_outputs"])
-        self.assertFalse(adapted.values["cache_text_encoder_outputs_to_disk"])
+        self.assertFalse(adapted.values["use_vae_cache"])
+        self.assertFalse(adapted.values["use_text_cache"])
         self.assertFalse(adapted.values["skip_cache_check"])
         self.assertTrue(any("skip_cache_check" in warning for warning in adapted.warnings))
 
@@ -464,11 +846,1008 @@ class AdapterTests(unittest.TestCase):
 
 
 class PreflightLauncherTests(unittest.TestCase):
+    def _run_resume_state_preflight(self, state: str):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            save_anima_model(root / "model.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            dataset.mkdir()
+            (dataset / "a.png").write_bytes(b"png")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+
+            resume = root / "run-step00000028-state"
+            if state == "empty":
+                resume.mkdir()
+            else:
+                save_minimal_resume_state(resume)
+                missing_names = {
+                    "missing_model": "model.safetensors",
+                    "missing_optimizer": "optimizer.bin",
+                    "missing_scheduler": "scheduler.bin",
+                    "missing_train_state": "train_state.json",
+                }
+                if state in missing_names:
+                    (resume / missing_names[state]).unlink()
+                elif state == "legacy_model":
+                    (resume / "model.safetensors").unlink()
+                    (resume / "pytorch_model.bin").write_bytes(b"model-state")
+                elif state == "invalid_train_state":
+                    (resume / "train_state.json").write_text(
+                        "{not-json",
+                        encoding="utf-8",
+                    )
+                elif state == "missing_current_step":
+                    (resume / "train_state.json").write_text(
+                        json.dumps({"current_epoch": 1}),
+                        encoding="utf-8",
+                    )
+            save_file(
+                {"network.weight": torch.zeros(1)},
+                root / "run-step00000028.safetensors",
+                metadata={"ss_num_blocks": "28"},
+            )
+
+            return run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(
+                        root / "model.safetensors"
+                    ),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    "resume": str(resume),
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+    def _run_truncated_safetensors_preflight(self, field: str):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            model = root / "model.safetensors"
+            if field == "pretrained_model_name_or_path":
+                model.write_bytes(b"truncated")
+            else:
+                save_anima_model(model)
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            dataset.mkdir()
+            (dataset / "a.png").write_bytes(b"png")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+
+            config = {
+                "pretrained_model_name_or_path": str(model),
+                "vae": str(root / "vae.safetensors"),
+                "qwen3": str(root / "qwen.safetensors"),
+                "train_data_dir": str(dataset),
+                "torch_compile": False,
+                "attn_mode": "torch",
+            }
+            if field == "network_weights":
+                network = root / "network_weights.safetensors"
+                network.write_bytes(b"truncated")
+                config[field] = str(network)
+            elif field == "resume":
+                resume = root / "run-step00000028-state"
+                save_minimal_resume_state(resume)
+                resume.with_name("run-step00000028.safetensors").write_bytes(
+                    b"truncated"
+                )
+                config[field] = str(resume)
+
+            return run_preflight(
+                config,
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+    def _run_skip_cache_preflight(
+        self,
+        *,
+        cache_field: str,
+        cache_state: str,
+    ):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            save_anima_model(root / "model.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            resized = root / "resized"
+            cache = root / "cache"
+            dataset.mkdir()
+            resized.mkdir()
+            for stem in ("a", "b"):
+                (dataset / f"{stem}.png").write_bytes(b"png")
+                (dataset / f"{stem}.txt").write_text("caption", encoding="utf-8")
+                write_png(resized / f"{stem}.png", 1024, 1024)
+
+            if cache_state != "missing_directory":
+                cache.mkdir()
+                cached_stems = ("a",) if cache_state == "missing_stem" else ("a", "b")
+                for stem in cached_stems:
+                    if cache_field == "use_vae_cache":
+                        (cache / f"{stem}_1024x1024_anima.npz").write_bytes(
+                            b"not-an-npz"
+                        )
+                    else:
+                        (cache / f"{stem}_anima_te.safetensors").write_bytes(
+                            b"not-safetensors"
+                        )
+
+            return run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(root / "model.safetensors"),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    "resized_image_dir": str(resized),
+                    "lora_cache_dir": str(cache),
+                    cache_field: True,
+                    "skip_cache_check": True,
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+    def _run_cache_with_resized_dir(
+        self,
+        *,
+        cache_field: str,
+        resized_state: str,
+    ):
+        import numpy as np
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            save_anima_model(root / "model.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            cache = root / "cache"
+            resized = root / "resized"
+            dataset.mkdir()
+            cache.mkdir()
+            if resized_state == "empty":
+                resized.mkdir()
+            (dataset / "a.png").write_bytes(b"png")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+            np.savez(
+                cache / "unrelated_1024x768_anima.npz",
+                latents_96x128=np.zeros((16, 1, 96, 128)),
+                original_size_96x128=np.zeros((2,)),
+                crop_ltrb_96x128=np.zeros((4,)),
+            )
+            save_file(
+                {
+                    "caption_dropout_rate": torch.zeros(1),
+                    "prompt_embeds": torch.zeros(1),
+                    "attn_mask": torch.zeros(1),
+                    "t5_input_ids": torch.zeros(1),
+                    "t5_attn_mask": torch.zeros(1),
+                },
+                cache / "unrelated_anima_te.safetensors",
+            )
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(root / "model.safetensors"),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    "resized_image_dir": str(resized),
+                    "lora_cache_dir": str(cache),
+                    cache_field: True,
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+            return result
+
+    def _run_optional_weight_path_preflight(
+        self,
+        *,
+        field: str,
+        path_kind: str,
+    ):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            model = root / "anima-base.safetensors"
+            save_file(
+                {
+                    "net.x_embedder.proj.1.weight": torch.zeros((2048, 1)),
+                    **{f"net.blocks.{index}.marker": torch.zeros(1) for index in range(28)},
+                },
+                model,
+            )
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            dataset.mkdir()
+            (dataset / "a.png").write_bytes(b"png")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+
+            if field == "resume" and path_kind != "file":
+                name = (
+                    "resume"
+                    if path_kind == "unsupported_directory"
+                    else "run-step00000028-state"
+                )
+                candidate = root / name
+            else:
+                candidate = root / f"{field}.safetensors"
+            if path_kind in {"directory", "unsupported_directory"}:
+                candidate.mkdir()
+            elif path_kind == "file":
+                save_file(
+                    {"network.weight": torch.zeros(1)},
+                    candidate,
+                    metadata={"ss_num_blocks": "28"},
+                )
+            elif path_kind == "resume_without_companion":
+                save_minimal_resume_state(candidate)
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(model),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    field: str(candidate),
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+            return result
+
+    def _run_text_cache_preflight(
+        self,
+        *,
+        cache_llm_adapter_outputs: bool | None,
+        adapter_cache: bool,
+    ):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            save_anima_model(root / "model.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            resized = root / "resized"
+            cache = root / "cache"
+            dataset.mkdir()
+            resized.mkdir()
+            cache.mkdir()
+            (dataset / "a.png").write_bytes(b"png")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+            (resized / "a.png").write_bytes(b"png")
+            tensors = {
+                "caption_dropout_rate": torch.zeros(1),
+                "t5_attn_mask": torch.zeros(1),
+            }
+            if adapter_cache:
+                tensors["crossattn_emb"] = torch.zeros(1)
+            else:
+                tensors.update(
+                    {
+                        "prompt_embeds": torch.zeros(1),
+                        "attn_mask": torch.zeros(1),
+                        "t5_input_ids": torch.zeros(1),
+                    }
+                )
+            save_file(tensors, cache / "a_anima_te.safetensors")
+
+            config = {
+                "pretrained_model_name_or_path": str(root / "model.safetensors"),
+                "vae": str(root / "vae.safetensors"),
+                "qwen3": str(root / "qwen.safetensors"),
+                "train_data_dir": str(dataset),
+                "resized_image_dir": str(resized),
+                "lora_cache_dir": str(cache),
+                "use_text_cache": True,
+                "torch_compile": False,
+                "attn_mode": "torch",
+            }
+            if cache_llm_adapter_outputs is not None:
+                config["cache_llm_adapter_outputs"] = cache_llm_adapter_outputs
+
+            return run_preflight(
+                config,
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+    def test_launch_spec_uses_bnb_cuda130_on_linux_aarch64(self):
+        with tempfile.TemporaryDirectory() as td, \
+            mock.patch("mikazuki.engines.anima_fast.launcher.platform.system", return_value="Linux"), \
+            mock.patch("mikazuki.engines.anima_fast.launcher.platform.machine", return_value="aarch64"):
+            root = Path(td)
+            runtime = make_runtime(root)
+            config = root / "config.toml"
+            config.write_text("", encoding="utf-8")
+            spec = build_launch_spec(runtime, config, "run-1")
+
+        self.assertEqual(spec.env["BNB_CUDA_VERSION"], "130")
+
+    def test_probe_dit_checkpoint_recognizes_base_and_29b_depth(self):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for blocks, variant in ((28, "anima-base"), (40, "anima-2.9b")):
+                path = root / f"anima-{blocks}.safetensors"
+                tensors = {
+                    "net.x_embedder.proj.1.weight": torch.zeros((2048, 1)),
+                    **{f"net.blocks.{index}.marker": torch.zeros(1) for index in range(blocks)},
+                }
+                save_file(tensors, path)
+
+                arch = preflight_module.probe_dit_checkpoint(path)
+
+                self.assertEqual(arch["num_blocks"], blocks)
+                self.assertEqual(arch["model_channels"], 2048)
+                self.assertEqual(arch["model_variant"], variant)
+
+    def test_probe_dit_checkpoint_rejects_missing_declared_shard(self):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            first = root / "anima-00001-of-00003.safetensors"
+            save_file(
+                {
+                    "net.x_embedder.proj.1.weight": torch.zeros((2048, 1)),
+                    "net.blocks.0.marker": torch.zeros(1),
+                },
+                first,
+            )
+            save_file(
+                {"net.blocks.27.marker": torch.zeros(1)},
+                root / "anima-00003-of-00003.safetensors",
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing checkpoint shard"):
+                preflight_module.probe_dit_checkpoint(first)
+
+    def test_probe_dit_checkpoint_rejects_mixed_declared_shard_totals(self):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            first = root / "anima-00001-of-00002.safetensors"
+            save_file(
+                {
+                    "net.x_embedder.proj.1.weight": torch.zeros((2048, 1)),
+                    "net.blocks.0.marker": torch.zeros(1),
+                },
+                first,
+            )
+            save_file(
+                {"net.blocks.27.marker": torch.zeros(1)},
+                root / "anima-00002-of-00003.safetensors",
+            )
+
+            with self.assertRaisesRegex(ValueError, "mixed checkpoint shard totals"):
+                preflight_module.probe_dit_checkpoint(first)
+
+    def test_preflight_rejects_truncated_configured_safetensors_headers(self):
+        expected_errors = {
+            "pretrained_model_name_or_path": "invalid Anima DiT checkpoint",
+            "network_weights": "cannot read network_weights metadata",
+            "resume": "cannot read resume metadata",
+        }
+        for field, expected_error in expected_errors.items():
+            with self.subTest(field=field):
+                result = self._run_truncated_safetensors_preflight(field)
+
+                self.assertFalse(result.ok)
+                self.assertTrue(
+                    any(expected_error in error for error in result.errors),
+                    result.errors,
+                )
+
+    def test_preflight_accepts_network_weights_without_block_metadata(self):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            save_anima_model(root / "model.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            dataset.mkdir()
+            (dataset / "a.png").write_bytes(b"png")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+            network = root / "network_weights.safetensors"
+            save_file({"network.weight": torch.zeros(1)}, network)
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(
+                        root / "model.safetensors"
+                    ),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    "network_weights": str(network),
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+            self.assertTrue(result.ok, result.errors)
+
+    def test_preflight_rejects_network_block_metadata_mismatch(self):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            model = root / "anima-2.9b.safetensors"
+            save_file(
+                {
+                    "net.x_embedder.proj.1.weight": torch.zeros((2048, 1)),
+                    **{f"net.blocks.{index}.marker": torch.zeros(1) for index in range(40)},
+                },
+                model,
+            )
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            dataset.mkdir()
+            (dataset / "a.png").write_bytes(b"png")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+            network = root / "network_weights.safetensors"
+            save_file(
+                {"network.weight": torch.zeros(1)},
+                network,
+                metadata={"ss_num_blocks": "28"},
+            )
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(model),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    "network_weights": str(network),
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+            self.assertFalse(result.ok)
+            self.assertTrue(
+                any("network_weights" in error and "28" in error and "40" in error for error in result.errors),
+                result.errors,
+            )
+
+    def test_preflight_rejects_resume_state_directory_block_metadata_mismatch(self):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            model = root / "anima-2.9b.safetensors"
+            save_file(
+                {
+                    "net.x_embedder.proj.1.weight": torch.zeros((2048, 1)),
+                    **{f"net.blocks.{index}.marker": torch.zeros(1) for index in range(40)},
+                },
+                model,
+            )
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            dataset.mkdir()
+            (dataset / "a.png").write_bytes(b"png")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+
+            resume = root / "run-step00000028-state"
+            save_minimal_resume_state(resume)
+            save_file(
+                {"network.weight": torch.zeros(1)},
+                root / "run-step00000028.safetensors",
+                metadata={"ss_num_blocks": "28"},
+            )
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(model),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    "resume": str(resume),
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+            self.assertFalse(result.ok)
+            self.assertTrue(
+                any("resume" in error and "28" in error and "40" in error for error in result.errors),
+                result.errors,
+            )
+
+    def test_preflight_rejects_missing_optional_weight_paths(self):
+        for field in ("network_weights", "resume"):
+            with self.subTest(field=field):
+                result = self._run_optional_weight_path_preflight(
+                    field=field,
+                    path_kind="missing",
+                )
+
+                self.assertFalse(result.ok)
+                self.assertTrue(
+                    any(field in error and "does not exist" in error for error in result.errors),
+                    result.errors,
+                )
+
+    def test_preflight_rejects_wrong_optional_weight_path_types(self):
+        for field, path_kind in (
+            ("network_weights", "directory"),
+            ("resume", "file"),
+        ):
+            with self.subTest(field=field):
+                result = self._run_optional_weight_path_preflight(
+                    field=field,
+                    path_kind=path_kind,
+                )
+
+                self.assertFalse(result.ok)
+                self.assertTrue(
+                    any(field in error and "must be" in error for error in result.errors),
+                    result.errors,
+                )
+
+    def test_preflight_rejects_resume_state_directory_without_companion(self):
+        result = self._run_optional_weight_path_preflight(
+            field="resume",
+            path_kind="resume_without_companion",
+        )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any(
+                "resume" in error and "companion" in error
+                for error in result.errors
+            ),
+            result.errors,
+        )
+
+    def test_preflight_rejects_unsupported_resume_directory_layout(self):
+        result = self._run_optional_weight_path_preflight(
+            field="resume",
+            path_kind="unsupported_directory",
+        )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any(
+                "resume" in error and "*-state" in error
+                for error in result.errors
+            ),
+            result.errors,
+        )
+
+    def test_preflight_rejects_empty_resume_state_directory(self):
+        result = self._run_resume_state_preflight("empty")
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any("resume state" in error for error in result.errors),
+            result.errors,
+        )
+
+    def test_preflight_rejects_incomplete_resume_state_directory(self):
+        for state, expected_name in (
+            ("missing_model", "model"),
+            ("missing_optimizer", "optimizer.bin"),
+            ("missing_scheduler", "scheduler.bin"),
+            ("missing_train_state", "train_state.json"),
+        ):
+            with self.subTest(state=state):
+                result = self._run_resume_state_preflight(state)
+
+                self.assertFalse(result.ok)
+                self.assertTrue(
+                    any(expected_name in error for error in result.errors),
+                    result.errors,
+                )
+
+    def test_preflight_rejects_invalid_resume_train_state(self):
+        for state in ("invalid_train_state", "missing_current_step"):
+            with self.subTest(state=state):
+                result = self._run_resume_state_preflight(state)
+
+                self.assertFalse(result.ok)
+                self.assertTrue(
+                    any("train_state.json" in error for error in result.errors),
+                    result.errors,
+                )
+
+    def test_preflight_accepts_minimal_resume_state_directory(self):
+        for state in ("valid", "legacy_model"):
+            with self.subTest(state=state):
+                result = self._run_resume_state_preflight(state)
+
+                self.assertTrue(result.ok, result.errors)
+
+    def test_v117_latent_cache_requires_bucket_specific_key(self):
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td)
+            np.savez(
+                cache / "a_1024x1024_anima.npz",
+                latents_96x128=np.zeros((1,)),
+            )
+
+            self.assertFalse(
+                preflight_module._v117_latent_cache_ok(
+                    cache / "a_1024x1024_anima.npz", 1024, 1024
+                )
+            )
+
+    def test_v117_latent_cache_accepts_matching_non_square_bucket_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td)
+            save_latent_npz(cache / "a_1024x768_anima.npz", 1024, 768)
+
+            self.assertTrue(
+                preflight_module._v117_latent_cache_ok(
+                    cache / "a_1024x768_anima.npz", 1024, 768
+                )
+            )
+
+    def test_v117_latent_cache_rejects_resolution_mismatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td)
+            save_latent_npz(cache / "a_0064x0064_anima.npz", 64, 64)
+
+            self.assertFalse(
+                preflight_module._v117_latent_cache_ok(
+                    cache / "a_0064x0064_anima.npz", 1024, 768
+                )
+            )
+
+    def test_v117_latent_cache_requires_bucket_metadata_keys(self):
+        import numpy as np
+
+        for missing_key in ("original_size_96x128", "crop_ltrb_96x128"):
+            with self.subTest(missing_key=missing_key), tempfile.TemporaryDirectory() as td:
+                cache = Path(td)
+                arrays = {
+                    "latents_96x128": np.zeros((16, 1, 96, 128)),
+                    "original_size_96x128": np.zeros((2,)),
+                    "crop_ltrb_96x128": np.zeros((4,)),
+                }
+                del arrays[missing_key]
+                np.savez(cache / "a_1024x768_anima.npz", **arrays)
+
+                self.assertFalse(
+                    preflight_module._v117_latent_cache_ok(
+                        cache / "a_1024x768_anima.npz", 1024, 768
+                    )
+                )
+
+    def test_v117_latent_cache_rejects_invalid_shapes(self):
+        import numpy as np
+
+        invalid_arrays = (
+            {
+                "latents_96x128": np.zeros((16, 1, 95, 128)),
+                "original_size_96x128": np.zeros((2,)),
+                "crop_ltrb_96x128": np.zeros((4,)),
+            },
+            {
+                "latents_96x128": np.zeros((16, 1, 96, 128)),
+                "original_size_96x128": np.zeros((1, 2)),
+                "crop_ltrb_96x128": np.zeros((4,)),
+            },
+            {
+                "latents_96x128": np.zeros((16, 1, 96, 128)),
+                "original_size_96x128": np.zeros((2,)),
+                "crop_ltrb_96x128": np.zeros((2, 2)),
+            },
+        )
+        for arrays in invalid_arrays:
+            with self.subTest(shapes={key: value.shape for key, value in arrays.items()}):
+                with tempfile.TemporaryDirectory() as td:
+                    cache = Path(td)
+                    np.savez(cache / "a_1024x768_anima.npz", **arrays)
+
+                    self.assertFalse(
+                        preflight_module._v117_latent_cache_ok(
+                            cache / "a_1024x768_anima.npz", 1024, 768
+                        )
+                    )
+
+    def test_v117_text_cache_requires_t5_attention_mask(self):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td)
+            save_file(
+                {
+                    "crossattn_emb": torch.zeros(1),
+                    "caption_dropout_rate": torch.zeros(1),
+                },
+                cache / "a_anima_te.safetensors",
+            )
+
+            self.assertFalse(
+                preflight_module._v117_text_cache_ok(
+                    cache / "a_anima_te.safetensors",
+                    cache_llm_adapter_outputs=True,
+                )
+            )
+
+    def test_v117_text_cache_requires_caption_dropout_rate(self):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td)
+            save_file(
+                {
+                    "prompt_embeds": torch.zeros(1),
+                    "attn_mask": torch.zeros(1),
+                    "t5_input_ids": torch.zeros(1),
+                    "t5_attn_mask": torch.zeros(1),
+                },
+                cache / "a_anima_te.safetensors",
+            )
+
+            self.assertFalse(
+                preflight_module._v117_text_cache_ok(
+                    cache / "a_anima_te.safetensors",
+                    cache_llm_adapter_outputs=False,
+                )
+            )
+
+    def test_v117_text_cache_requires_complete_variant_key_groups(self):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td)
+            save_file(
+                {
+                    "num_variants": torch.tensor(2),
+                    "caption_dropout_rate": torch.zeros(1),
+                    "crossattn_emb_v0": torch.zeros(1),
+                    "t5_attn_mask_v0": torch.zeros(1),
+                    "crossattn_emb_v1": torch.zeros(1),
+                },
+                cache / "a_anima_te.safetensors",
+            )
+
+            self.assertFalse(
+                preflight_module._v117_text_cache_ok(
+                    cache / "a_anima_te.safetensors",
+                    cache_llm_adapter_outputs=True,
+                )
+            )
+
+    def test_v117_text_cache_accepts_complete_variant_key_groups(self):
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td)
+            save_file(
+                {
+                    "num_variants": torch.tensor(2),
+                    "caption_dropout_rate": torch.zeros(1),
+                    "crossattn_emb_v0": torch.zeros(1),
+                    "t5_attn_mask_v0": torch.zeros(1),
+                    "crossattn_emb_v1": torch.zeros(1),
+                    "t5_attn_mask_v1": torch.zeros(1),
+                },
+                cache / "a_anima_te.safetensors",
+            )
+
+            self.assertTrue(
+                preflight_module._v117_text_cache_ok(
+                    cache / "a_anima_te.safetensors",
+                    cache_llm_adapter_outputs=True,
+                )
+            )
+
+    def test_preflight_adapter_cache_mode_rejects_plain_text_cache(self):
+        result = self._run_text_cache_preflight(
+            cache_llm_adapter_outputs=True,
+            adapter_cache=False,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any("use_text_cache=true" in error for error in result.errors),
+            result.errors,
+        )
+
+    def test_preflight_plain_cache_mode_rejects_adapter_text_cache(self):
+        result = self._run_text_cache_preflight(
+            cache_llm_adapter_outputs=False,
+            adapter_cache=True,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any("use_text_cache=true" in error for error in result.errors),
+            result.errors,
+        )
+
+    def test_preflight_text_cache_mode_accepts_matching_layout(self):
+        for cache_llm_adapter_outputs in (False, True):
+            with self.subTest(cache_llm_adapter_outputs=cache_llm_adapter_outputs):
+                result = self._run_text_cache_preflight(
+                    cache_llm_adapter_outputs=cache_llm_adapter_outputs,
+                    adapter_cache=cache_llm_adapter_outputs,
+                )
+
+                self.assertTrue(result.ok, result.errors)
+
+    def test_preflight_missing_cache_mode_accepts_plain_text_cache(self):
+        result = self._run_text_cache_preflight(
+            cache_llm_adapter_outputs=None,
+            adapter_cache=False,
+        )
+
+        self.assertTrue(result.ok, result.errors)
+
+    def test_preflight_missing_cache_mode_rejects_adapter_text_cache(self):
+        result = self._run_text_cache_preflight(
+            cache_llm_adapter_outputs=None,
+            adapter_cache=True,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any("use_text_cache=true" in error for error in result.errors),
+            result.errors,
+        )
+
+    def test_preflight_rejects_incomplete_v117_cache_sets(self):
+        import numpy as np
+        import torch
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            save_anima_model(root / "model.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            resized = root / "resized"
+            cache = root / "cache"
+            dataset.mkdir()
+            resized.mkdir()
+            cache.mkdir()
+            for stem in ("a", "b"):
+                (dataset / f"{stem}.png").write_bytes(b"png")
+                (dataset / f"{stem}.txt").write_text("caption", encoding="utf-8")
+                write_png(resized / f"{stem}.png", 1024, 1024)
+            np.savez(cache / "a_1024x1024_anima.npz", latents_1024x1024=np.zeros((1,)))
+            save_file(
+                {
+                    "prompt_embeds": torch.zeros(1),
+                    "attn_mask": torch.zeros(1),
+                    "t5_input_ids": torch.zeros(1),
+                    "t5_attn_mask": torch.zeros(1),
+                },
+                cache / "a_anima_te.safetensors",
+            )
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(root / "model.safetensors"),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    "resized_image_dir": str(resized),
+                    "lora_cache_dir": str(cache),
+                    "use_vae_cache": True,
+                    "use_text_cache": True,
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(any("use_vae_cache=true" in error for error in result.errors))
+        self.assertTrue(any("use_text_cache=true" in error for error in result.errors))
+
     def test_preflight_happy_path_with_injected_probe(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             runtime = make_runtime(root)
-            for file in ("model.safetensors", "vae.safetensors", "qwen.safetensors"):
+            save_anima_model(root / "model.safetensors")
+            for file in ("vae.safetensors", "qwen.safetensors"):
                 (root / file).write_text("", encoding="utf-8")
             dataset = root / "dataset"
             dataset.mkdir()
@@ -491,7 +1870,8 @@ class PreflightLauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             runtime = make_runtime(root)
-            for file in ("model.safetensors", "vae.safetensors", "qwen.safetensors"):
+            save_anima_model(root / "model.safetensors")
+            for file in ("vae.safetensors", "qwen.safetensors"):
                 (root / file).write_text("", encoding="utf-8")
             dataset = root / "dataset"
             dataset.mkdir()
@@ -510,7 +1890,33 @@ class PreflightLauncherTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result.errors)
 
-    def test_preflight_warns_for_bucket_static_token_count(self):
+    def test_preflight_requires_dynamic_compile_for_freefit(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            save_anima_model(root / "model.safetensors")
+            for file in ("vae.safetensors", "qwen.safetensors"):
+                (root / file).write_text("", encoding="utf-8")
+            dataset = root / "dataset"
+            dataset.mkdir()
+            (dataset / "a.png").write_text("", encoding="utf-8")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+
+            result = run_preflight({
+                "pretrained_model_name_or_path": "model.safetensors",
+                "vae": "vae.safetensors",
+                "qwen3": "qwen.safetensors",
+                "train_data_dir": "dataset",
+                "resolution": "64,64",
+                "compile_dynamic_seq": False,
+                "torch_compile": True,
+                "attn_mode": "flash",
+            }, runtime, lambda _runtime: ProbeFacts("3.13.11", torch_metadata_version="2.11.0+cu130", cuda_available=True, flash_attn_importable=True))
+
+        self.assertFalse(result.ok)
+        self.assertTrue(any("compile_dynamic_seq" in error for error in result.errors))
+
+    def test_preflight_rejects_torch_attention_with_torch_compile(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             runtime = make_runtime(root)
@@ -527,25 +1933,29 @@ class PreflightLauncherTests(unittest.TestCase):
                 "qwen3": "qwen.safetensors",
                 "train_data_dir": "dataset",
                 "resolution": "64,64",
-                "static_token_count": 1024,
-                "enable_bucket": True,
-                "torch_compile": False,
-                "attn_mode": "flash",
-            }, runtime, lambda _runtime: ProbeFacts("3.13.11", torch_metadata_version="2.11.0+cu130", cuda_available=True, flash_attn_importable=True))
+                "attn_mode": "torch",
+                "torch_compile": True,
+            }, runtime, lambda _runtime: ProbeFacts("3.13.11", torch_metadata_version="2.11.0+cu130", cuda_available=True))
 
-        self.assertTrue(result.ok, result.errors)
-        self.assertTrue(any("static_token_count=4096" in warning for warning in result.warnings))
+        self.assertFalse(result.ok)
+        self.assertTrue(any("attn_mode=torch" in error and "torch_compile=true" in error for error in result.errors))
 
     def test_preflight_rejects_cache_flags_without_preprocess_cache(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             runtime = make_runtime(root)
-            for file in ("model.safetensors", "vae.safetensors", "qwen.safetensors"):
+            save_anima_model(root / "model.safetensors")
+            for file in ("vae.safetensors", "qwen.safetensors"):
                 (root / file).write_text("", encoding="utf-8")
             dataset = root / "dataset"
+            resized = root / "empty-resized"
+            cache = root / "empty-lora-cache"
             dataset.mkdir()
+            resized.mkdir()
+            cache.mkdir()
             (dataset / "a.png").write_text("", encoding="utf-8")
             (dataset / "a.txt").write_text("caption", encoding="utf-8")
+            write_png(resized / "a.png", 64, 64)
 
             result = run_preflight({
                 "pretrained_model_name_or_path": "model.safetensors",
@@ -558,19 +1968,275 @@ class PreflightLauncherTests(unittest.TestCase):
                 "resolution": "64,64",
                 "static_token_count": 4096,
                 "attn_mode": "flash",
-                "cache_latents": True,
-                "cache_text_encoder_outputs": True,
+                "use_vae_cache": True,
+                "use_text_cache": True,
             }, runtime, lambda _runtime: ProbeFacts("3.13.11", torch_metadata_version="2.11.0+cu130", cuda_available=True, flash_attn_importable=True))
 
         self.assertFalse(result.ok)
-        self.assertTrue(any("cache_latents=true requires completed" in error for error in result.errors))
-        self.assertTrue(any("cache_text_encoder_outputs=true requires completed" in error for error in result.errors))
+        self.assertTrue(any("use_vae_cache=true is missing cache files" in error for error in result.errors))
+        self.assertTrue(any("use_text_cache=true is missing cache files" in error for error in result.errors))
+
+    def test_preflight_cache_requires_existing_resized_image_dir(self):
+        for cache_field in ("use_vae_cache", "use_text_cache"):
+            with self.subTest(cache_field=cache_field):
+                result = self._run_cache_with_resized_dir(
+                    cache_field=cache_field,
+                    resized_state="missing",
+                )
+
+                self.assertFalse(result.ok)
+                self.assertTrue(
+                    any(
+                        "resized_image_dir" in error and "does not exist" in error
+                        for error in result.errors
+                    ),
+                    result.errors,
+                )
+
+    def test_preflight_cache_requires_resized_images(self):
+        for cache_field in ("use_vae_cache", "use_text_cache"):
+            with self.subTest(cache_field=cache_field):
+                result = self._run_cache_with_resized_dir(
+                    cache_field=cache_field,
+                    resized_state="empty",
+                )
+
+                self.assertFalse(result.ok)
+                self.assertTrue(
+                    any(
+                        "resized_image_dir" in error and "no supported images" in error
+                        for error in result.errors
+                    ),
+                    result.errors,
+                )
+
+    def test_preflight_skip_cache_check_still_requires_cache_directory(self):
+        for cache_field in ("use_vae_cache", "use_text_cache"):
+            with self.subTest(cache_field=cache_field):
+                result = self._run_skip_cache_preflight(
+                    cache_field=cache_field,
+                    cache_state="missing_directory",
+                )
+
+                self.assertFalse(result.ok)
+                self.assertTrue(
+                    any("lora_cache_dir" in error for error in result.errors),
+                    result.errors,
+                )
+
+    def test_preflight_skip_cache_check_still_requires_cache_file_coverage(self):
+        for cache_field in ("use_vae_cache", "use_text_cache"):
+            with self.subTest(cache_field=cache_field):
+                result = self._run_skip_cache_preflight(
+                    cache_field=cache_field,
+                    cache_state="missing_stem",
+                )
+
+                self.assertFalse(result.ok)
+                self.assertTrue(
+                    any("missing cache files" in error and "b" in error for error in result.errors),
+                    result.errors,
+                )
+
+    def test_preflight_skip_cache_check_skips_only_cache_contents(self):
+        for cache_field in ("use_vae_cache", "use_text_cache"):
+            with self.subTest(cache_field=cache_field):
+                result = self._run_skip_cache_preflight(
+                    cache_field=cache_field,
+                    cache_state="complete_invalid_contents",
+                )
+
+                self.assertTrue(result.ok, result.errors)
+
+    def test_preflight_rejects_latent_cache_with_wrong_resolution(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            save_anima_model(root / "model.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            resized = root / "resized"
+            cache = root / "cache"
+            dataset.mkdir()
+            resized.mkdir()
+            cache.mkdir()
+            (dataset / "a.png").write_bytes(b"png")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+            write_png(resized / "a.png", 1024, 768)
+            save_latent_npz(cache / "a_0064x0064_anima.npz", 64, 64)
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(root / "model.safetensors"),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    "resized_image_dir": str(resized),
+                    "lora_cache_dir": str(cache),
+                    "use_vae_cache": True,
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any(
+                "use_vae_cache=true is missing cache files" in error and "a" in error
+                for error in result.errors
+            ),
+            result.errors,
+        )
+
+    def test_preflight_rejects_text_cache_in_wrong_subdirectory(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            save_anima_model(root / "model.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            resized = root / "resized"
+            cache = root / "cache"
+            dataset.mkdir()
+            cache.mkdir()
+            (dataset / "a.png").write_bytes(b"png")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+            write_png(resized / "foo" / "a.png", 1024, 768)
+            save_text_cache(cache / "bar" / "a_anima_te.safetensors")
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(root / "model.safetensors"),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    "resized_image_dir": str(resized),
+                    "lora_cache_dir": str(cache),
+                    "use_text_cache": True,
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any(
+                "use_text_cache=true is missing cache files" in error
+                and "foo/a" in error
+                for error in result.errors
+            ),
+            result.errors,
+        )
+
+    def test_preflight_allows_same_stem_images_in_different_subdirectories(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            save_anima_model(root / "model.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            resized = root / "resized"
+            cache = root / "cache"
+            for subdir in ("one", "two"):
+                (dataset / subdir).mkdir(parents=True)
+                write_png(dataset / subdir / "a.png", 64, 64)
+                (dataset / subdir / "a.txt").write_text("caption", encoding="utf-8")
+                write_png(resized / subdir / "a.png", 64, 64)
+                save_latent_npz(cache / subdir / "a_0064x0064_anima.npz", 64, 64)
+                save_text_cache(cache / subdir / "a_anima_te.safetensors")
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(root / "model.safetensors"),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    "resized_image_dir": str(resized),
+                    "lora_cache_dir": str(cache),
+                    "use_vae_cache": True,
+                    "use_text_cache": True,
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+        self.assertTrue(result.ok, result.errors)
+
+    def test_preflight_skip_cache_check_still_rejects_wrong_resolution_latent(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            save_anima_model(root / "model.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+            dataset = root / "dataset"
+            resized = root / "resized"
+            cache = root / "cache"
+            dataset.mkdir()
+            resized.mkdir()
+            cache.mkdir()
+            (dataset / "a.png").write_bytes(b"png")
+            (dataset / "a.txt").write_text("caption", encoding="utf-8")
+            write_png(resized / "a.png", 1024, 768)
+            save_latent_npz(cache / "a_0064x0064_anima.npz", 64, 64)
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(root / "model.safetensors"),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(dataset),
+                    "resized_image_dir": str(resized),
+                    "lora_cache_dir": str(cache),
+                    "use_vae_cache": True,
+                    "skip_cache_check": True,
+                    "torch_compile": False,
+                    "attn_mode": "torch",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any(
+                "use_vae_cache=true is missing cache files" in error
+                for error in result.errors
+            ),
+            result.errors,
+        )
 
     def test_preflight_allows_live_encoding_without_preprocess_cache(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             runtime = make_runtime(root)
-            for file in ("model.safetensors", "vae.safetensors", "qwen.safetensors"):
+            save_anima_model(root / "model.safetensors")
+            for file in ("vae.safetensors", "qwen.safetensors"):
                 (root / file).write_text("", encoding="utf-8")
             dataset = root / "dataset"
             dataset.mkdir()
@@ -601,7 +2267,8 @@ class PreflightLauncherTests(unittest.TestCase):
             (root / "data").mkdir()
             (root / "data" / "1.png").write_bytes(b"png")
             (root / "data" / "1.txt").write_text("test", encoding="utf-8")
-            for name in ("dit.safetensors", "vae.safetensors", "qwen.safetensors"):
+            save_anima_model(root / "dit.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
                 (root / name).write_bytes(b"x")
 
             result = run_preflight({
@@ -686,14 +2353,15 @@ class PreflightLauncherTests(unittest.TestCase):
         self.assertEqual(adapted.values["optimizer_args"], ["eps=1e-6", "weight_decay=0.01"])
         self.assertFalse(any("eps=1e-8" in warning for warning in adapted.warnings))
 
-    def test_preflight_rejects_compile_mode_full_with_gradient_checkpointing(self):
+    def test_preflight_accepts_v117_dynamic_compile_contract(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             runtime = make_runtime(root)
             (root / "data").mkdir()
             (root / "data" / "1.png").write_bytes(b"png")
             (root / "data" / "1.txt").write_text("test", encoding="utf-8")
-            for name in ("dit.safetensors", "vae.safetensors", "qwen.safetensors"):
+            save_anima_model(root / "dit.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
                 (root / name).write_bytes(b"x")
 
             result = run_preflight(
@@ -702,20 +2370,128 @@ class PreflightLauncherTests(unittest.TestCase):
                     "vae": str(root / "vae.safetensors"),
                     "qwen3": str(root / "qwen.safetensors"),
                     "train_data_dir": str(root / "data"),
-                    "compile_mode": "full",
                     "gradient_checkpointing": True,
-                    "torch_compile": False,
-                    "static_token_count": 4096,
+                    "torch_compile": True,
+                    "compile_dynamic_seq": True,
+                    "attn_mode": "flash",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                    flash_attn_importable=True,
+                ),
+            )
+
+        self.assertTrue(result.ok, result.errors)
+
+    def test_preflight_rejects_torch_attention_with_compile(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            (root / "data").mkdir()
+            (root / "data" / "1.png").write_bytes(b"png")
+            (root / "data" / "1.txt").write_text("test", encoding="utf-8")
+            save_anima_model(root / "dit.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(root / "dit.safetensors"),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(root / "data"),
+                    "torch_compile": True,
+                    "compile_dynamic_seq": True,
                     "attn_mode": "torch",
                 },
                 runtime,
-                lambda _runtime: ProbeFacts("3.13.11", torch_metadata_version="2.11.0+cu130", cuda_available=True),
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
             )
 
         self.assertFalse(result.ok)
-        self.assertTrue(any("gradient_checkpointing" in err for err in result.errors))
+        self.assertTrue(
+            any("#336" in error and "torch_compile" in error for error in result.errors),
+            result.errors,
+        )
 
-    def test_adapt_config_downgrades_compile_mode_full_conflict(self):
+    def test_preflight_rejects_empty_attention_with_compile(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            (root / "data").mkdir()
+            (root / "data" / "1.png").write_bytes(b"png")
+            (root / "data" / "1.txt").write_text("test", encoding="utf-8")
+            save_anima_model(root / "dit.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(root / "dit.safetensors"),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(root / "data"),
+                    "torch_compile": True,
+                    "compile_dynamic_seq": True,
+                    "attn_mode": "",
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any("#336" in error and "torch_compile" in error for error in result.errors),
+            result.errors,
+        )
+
+    def test_preflight_rejects_none_attention_with_compile(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runtime = make_runtime(root)
+            (root / "data").mkdir()
+            (root / "data" / "1.png").write_bytes(b"png")
+            (root / "data" / "1.txt").write_text("test", encoding="utf-8")
+            save_anima_model(root / "dit.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
+                (root / name).write_bytes(b"x")
+
+            result = run_preflight(
+                {
+                    "pretrained_model_name_or_path": str(root / "dit.safetensors"),
+                    "vae": str(root / "vae.safetensors"),
+                    "qwen3": str(root / "qwen.safetensors"),
+                    "train_data_dir": str(root / "data"),
+                    "torch_compile": True,
+                    "compile_dynamic_seq": True,
+                    "attn_mode": None,
+                },
+                runtime,
+                lambda _runtime: ProbeFacts(
+                    "3.13.11",
+                    torch_metadata_version="2.11.0+cu130",
+                    cuda_available=True,
+                ),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any("#336" in error and "torch_compile" in error for error in result.errors),
+            result.errors,
+        )
+
+    def test_adapt_config_ignores_removed_compile_mode(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             runtime = make_runtime(root)
@@ -730,8 +2506,8 @@ class PreflightLauncherTests(unittest.TestCase):
                 "run-1",
             )
 
-        self.assertEqual(adapted.values["compile_mode"], "blocks")
-        self.assertTrue(any("gradient_checkpointing" in w for w in adapted.warnings))
+        self.assertNotIn("compile_mode", adapted.values)
+        self.assertTrue(any("compile_mode" in w for w in adapted.warnings))
 
     def test_preflight_rejects_automagic_even_when_quanto_is_available(self):
         with tempfile.TemporaryDirectory() as td:
@@ -740,7 +2516,8 @@ class PreflightLauncherTests(unittest.TestCase):
             (root / "data").mkdir()
             (root / "data" / "1.png").write_bytes(b"png")
             (root / "data" / "1.txt").write_text("test", encoding="utf-8")
-            for name in ("dit.safetensors", "vae.safetensors", "qwen.safetensors"):
+            save_anima_model(root / "dit.safetensors")
+            for name in ("vae.safetensors", "qwen.safetensors"):
                 (root / name).write_bytes(b"x")
 
             result = run_preflight(

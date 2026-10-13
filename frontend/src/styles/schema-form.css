@@ -1,4 +1,10 @@
 /* schema-form — split from layout.css / features.css (issue #235) */
+.anima-model-field { grid-column: 1 / -1; min-width: 0; }
+.anima-model-spec { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 8px; font-size: 13px; color: var(--text-soft); }
+.anima-model-options { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.anima-model-options label { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; font-weight: 400; cursor: pointer; }
+.anima-model-options input { margin: 0; width: 14px; height: 14px; accent-color: var(--accent); }
+.anima-model-unconfirmed { font-size: 12px; color: var(--text-soft); }
 .argument-heading strong {
   font-size: 12px;
   font-weight: 750;
@@ -167,9 +173,18 @@
 }
 
 .filepicker-control {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  display: flex;
   gap: 6px;
+}
+
+.filepicker-control .el-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.filepicker-control .el-button {
+  flex-shrink: 0;
+  margin-left: 0;
 }
 
 .model-assets-tools {
@@ -310,7 +325,43 @@
 }
 
 .field-control {
-  display: contents;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.field-control-wrap {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.field-reset {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--text-soft);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: 0.15s ease;
+}
+
+.field-reset:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.field-reset:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .schema-field--compact {
@@ -329,7 +380,7 @@
   gap: 6px;
 }
 
-.schema-field--compact .field-control {
+.schema-field--compact .field-control-wrap {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
@@ -355,6 +406,12 @@
   .schema-field--compact {
     flex-direction: column;
     align-items: stretch;
+  }
+}
+
+@media (max-width: 900px) {
+  .schema-field--compact .field-control-wrap {
+    width: 100%;
   }
 }
 
@@ -459,14 +516,11 @@
 
 @media (max-width: 720px) {
   .filepicker-control {
-    grid-template-columns: minmax(0, 1fr) auto;
+    flex-wrap: wrap;
   }
-}
 
-@media (max-width: 720px) {
-  .filepicker-control .el-button:last-child {
-    grid-column: 1/-1;
-    margin-left: 0;
+  .filepicker-control .el-input {
+    flex-basis: 100%;
   }
 }
 
@@ -515,6 +569,42 @@
 
 .param-diagnostics p.error {
   color: var(--danger);
+}
+
+.dataset-check-list {
+  display: grid;
+  gap: 14px;
+}
+
+.dataset-check-item {
+  display: grid;
+  gap: 6px;
+}
+
+.dataset-check-path {
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.dataset-check-stats {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.dataset-check-finding {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-soft);
+}
+
+.dataset-check-finding.error {
+  color: var(--danger);
+}
+
+.dataset-check-finding.warning {
+  color: var(--warning-text);
 }
 
 .started-task {

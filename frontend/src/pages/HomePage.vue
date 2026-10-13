@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import { useI18n } from "vue-i18n"
+import qwenPoster from "../assets/qwen-image-21-poster-16-9.png"
 
 const { t } = useI18n()
 
@@ -10,11 +11,14 @@ const portals = computed(() => [
   { title: t("home.portals.tasks.title"), text: t("home.portals.tasks.text"), to: "/tasks", tone: "cyan" },
 ] as const)
 
-/** Promo slides for 3.0.0: intro + ModelScope + remote event poster (not bundled). */
-const EVENT_POSTER_URL =
-  "https://cdn.jsdelivr.net/gh/wochenlong/lora-scripts-next@main/docs/design/assets/home-event-anima.webp"
-
 const slides = computed(() => [
+  {
+    id: "qwen-image-21",
+    kind: "training-poster" as const,
+    src: qwenPoster,
+    href: "https://github.com/wochenlong/lora-scripts-next/blob/main/docs/diffsynth.md",
+    alt: "Qwen-Image-2.1 训练支持",
+  },
   { id: "intro", kind: "intro" as const },
   {
     id: "modelscope",
@@ -24,15 +28,6 @@ const slides = computed(() => [
     title: t("home.sponsor.modelscope.title"),
     text: t("home.sponsor.modelscope.text"),
     cta: t("home.sponsor.modelscope.cta"),
-  },
-  {
-    id: "anima-event",
-    kind: "poster" as const,
-    src: EVENT_POSTER_URL,
-    href: "https://kusart.com/zh-CN/events/anima",
-    alt: t("home.sponsor.anima.alt"),
-    badge: t("home.sponsor.anima.badge"),
-    caption: t("home.sponsor.anima.caption"),
   },
 ])
 
@@ -117,10 +112,6 @@ onBeforeUnmount(stopAutoplay)
           <template v-else>
             <a class="hero-poster" :href="slide.href" target="_blank" rel="noopener noreferrer">
               <img :src="slide.src" :alt="slide.alt" />
-              <div class="poster-meta">
-                <span class="poster-tag">{{ slide.badge }}</span>
-                <span class="poster-tag">{{ slide.caption }}</span>
-              </div>
             </a>
           </template>
         </article>
@@ -156,6 +147,7 @@ onBeforeUnmount(stopAutoplay)
       <span>{{ t("home.status.vue") }}</span>
       <span>{{ t("home.status.models") }}</span>
     </section>
+    <p class="home-portable-tip">{{ t("home.portableAnimaTip") }}</p>
     <p class="home-credit">
       <i18n-t keypath="home.credit" tag="span" scope="global">
         <template #about><RouterLink to="/settings/about">{{ t("settings.nav.about") }}</RouterLink></template>

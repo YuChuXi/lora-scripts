@@ -6,6 +6,8 @@
 
 **实现以当前代码与** [`docs/train-monitor.md`](../../train-monitor.md)、[`docs/cli-args.md`](../../cli-args.md) **为准**；本目录为规划中的统一端口契约（如 `/monitor/`、服务注册表等），可能与 main 不一致。
 
+> **2026-09 更新**：legacy Gradio Dataset Tag Editor（`:28001` / `/proxy/tageditor/`）已从主线移除；草案中的 `tag-editor` 条目仅作历史规划参考，不再实现。
+
 ## Discussion #53 已对齐的执行顺序（摘要）
 
 [@MikumikuDAIFans](https://github.com/MikumikuDAIFans) 在 [#53](https://github.com/wochenlong/lora-scripts-next/discussions/53) 表态：

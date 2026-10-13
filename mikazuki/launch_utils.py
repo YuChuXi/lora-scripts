@@ -52,20 +52,17 @@ def prepare_git():
         return False
 
 
-def prepare_submodules():
+def ensure_frontend_dist():
     frontend_path = Path(os.environ.get("MIKAZUKI_FRONTEND_DIST", "frontend/dist"))
     if not frontend_path.is_absolute():
         frontend_path = base_dir_path() / frontend_path
-    tag_editor_path = base_dir_path() / "mikazuki" / "dataset-tag-editor" / "scripts"
 
-    if not os.path.exists(frontend_path) or not os.path.exists(tag_editor_path):
-        log.info("submodule not found, try clone...")
-        log.info("checking git installation...")
-        if not prepare_git():
-            log.error("git not found, please install git first")
-            sys.exit(1)
-        subprocess.run(["git", "submodule", "init"])
-        subprocess.run(["git", "submodule", "update"])
+    if not frontend_path.exists():
+        log.error(
+            "frontend/dist not found. Build or restore the Vue frontend before starting the GUI. / "
+            "未找到 frontend/dist，请先构建或恢复 Vue 前端后再启动。"
+        )
+        sys.exit(1)
 
 
 def git_tag(path: str) -> str:
@@ -207,7 +204,7 @@ def _parse_env_marker(line: str):
 
 
 def validate_requirements(requirements_file: str):
-    with open(requirements_file, 'r', encoding='utf8') as f:
+    with open(requirements_file, 'r', encoding='utf-8-sig') as f:
         lines = [
             line.strip()
             for line in f.readlines()
@@ -252,7 +249,7 @@ def ensure_requirements_installed(requirements_file: str = "requirements.txt") -
         return
 
     try:
-        with open(req_path, "r", encoding="utf8") as f:
+        with open(req_path, "r", encoding="utf-8-sig") as f:
             raw_lines = f.readlines()
     except OSError as e:
         log.warning(f"could not read {req_path}: {e}")
@@ -432,7 +429,7 @@ def prepare_environment(disable_auto_mirror: bool = True, prepare_onnxruntime: b
     if not os.environ.get("PATH"):
         os.environ["PATH"] = os.path.dirname(sys.executable)
 
-    prepare_submodules()
+    ensure_frontend_dist()
 
     check_dirs(["config/autosave", "logs"])
 

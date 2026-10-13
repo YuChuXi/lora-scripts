@@ -10,13 +10,18 @@
 
 ## 下载 Anima 模型
 
-Anima 训练需要三个权重文件（DiT、Qwen3 文本编码器、VAE）。**整合包**根目录或**源码 clone 根目录**均可双击：
+Anima 训练需要三个权重文件（DiT、Qwen3 文本编码器、VAE）。双击一键下载脚本即可：
 
 ```text
 Download-Anima-Model.bat
 ```
 
-脚本会从 ModelScope（`circlestone-labs/Anima`）下载到相对路径 **`sd-models/anima/`**，已存在的文件会自动跳过。也支持放在整合包根目录（与 `run_gui.bat` 同级）或 `SD-Trainer/` 内（与 `gui.py` 同级）。
+| 场景 | 脚本位置 |
+|------|----------|
+| **2026 整合包** | `tools\Download-Anima-Model.bat`（根目录只有「启动 / 检查更新 / 说明」，**不要在根目录找**） |
+| 源码 clone / 旧版整合包 | 仓库根或整合包根（与 `run_gui.bat` / `gui.py` 同级） |
+
+脚本会从 ModelScope（`circlestone-labs/Anima`）下载到相对路径 **`sd-models/anima/`**，已存在的文件会自动跳过。
 
 ## 模型路径
 

@@ -17,6 +17,7 @@ interface TasksData {
 
 export interface TaskPreviewImage {
   name: string
+  sample_id?: number
   epoch?: number | null
   step?: number | null
   mtime: number
@@ -37,6 +38,7 @@ export interface TaskMetricsPoint {
 export type TaskMetrics = Record<string, TaskMetricsPoint[]>
 
 export interface TaskProgress {
+  phase?: string
   percent?: number
   step?: number
   total_steps?: number
@@ -64,11 +66,55 @@ export interface TaskRetryResult {
   queued: boolean
 }
 
+export interface TaskConfigData {
+  config: Record<string, unknown>
+  config_path: string
+  backend: string
+  train_type?: string | null
+  output_name?: string | null
+}
+
+export interface TaskPurgeResult {
+  removed: number
+}
+
+export interface TaskMoveResult {
+  moved: boolean
+  queue_position?: number | null
+}
+
+export interface BatchEnqueueItem {
+  file: string
+  ok: boolean
+  task_id?: string
+  queued?: boolean
+  error?: string
+  output_name_renamed?: { from: string; to: string }
+}
+
+export interface BatchEnqueueData {
+  results: BatchEnqueueItem[]
+  ok_count: number
+  fail_count: number
+  queue_dir: string
+}
+
 export const tasksApi = {
   list: async () => (await apiData<TasksData>("/api/tasks")).tasks,
   terminate: (taskId: string) => apiRequest(`/api/tasks/terminate/${encodeURIComponent(taskId)}`),
   resume: (taskId: string) => apiRequest(`/api/tasks/resume/${encodeURIComponent(taskId)}`),
   retry: (taskId: string) => apiData<TaskRetryResult>(`/api/tasks/retry/${encodeURIComponent(taskId)}`),
+  remove: (taskId: string) => apiRequest(`/api/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" }),
+  purge: (keepLast: number) => apiData<TaskPurgeResult>("/api/tasks/purge", { method: "POST", body: JSON.stringify({ keep_last: keepLast }) }),
+  moveToFront: (taskId: string) => apiData<TaskMoveResult>(`/api/tasks/${encodeURIComponent(taskId)}/move-to-front`, { method: "POST" }),
+  setAutoRetry: (count: number) => apiData<{ auto_retry_max: number }>("/api/tasks/auto_retry", { method: "POST", body: JSON.stringify({ count }) }),
+  getAutoRetry: () => apiData<{ auto_retry_max: number }>("/api/tasks/auto_retry"),
+  batchEnqueue: (files: File[]) => {
+    const form = new FormData()
+    files.forEach((file) => form.append("files", file))
+    return apiData<BatchEnqueueData>("/api/tasks/batch-enqueue", { method: "POST", body: form })
+  },
+  config: (taskId: string) => apiData<TaskConfigData>(`/api/tasks/${encodeURIComponent(taskId)}/config`),
   previews: (taskId: string, signal?: AbortSignal) => apiData<TaskPreviewsData>(`/api/tasks/${encodeURIComponent(taskId)}/previews`, { signal }),
   metrics: (taskId: string, signal?: AbortSignal) => apiData<TaskMetricsData>(`/api/tasks/${encodeURIComponent(taskId)}/metrics`, { signal }),
   logTail: (taskId: string, limit = 240) => apiData<TaskLogTail>(`/api/train/log/tail/${encodeURIComponent(taskId)}?limit=${limit}`),

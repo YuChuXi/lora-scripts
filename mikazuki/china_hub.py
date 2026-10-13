@@ -6,8 +6,10 @@ because huggingface_hub speaks a different API than ModelScope.
 
 ModelScope ships ``modelscope.utils.hf_util.patch_hub()`` which replaces
 ``hf_hub_download`` / ``snapshot_download`` so transformers and sd-scripts keep
-using Hugging Face repo ids in code while files are fetched from modelscope.cn
-and placed in the normal HF cache layout (when ``cache_dir`` is passed).
+using Hugging Face repo ids in code while files are fetched from modelscope.cn.
+Note: the patched downloader stores snapshots in ModelScope's own cache and
+ignores the HF ``cache_dir`` argument — callers needing assets at a specific
+location must resolve them from the ModelScope cache instead.
 
 Some Hugging Face repo ids differ on ModelScope (e.g. openai/clip-vit-large-patch14
 → AI-ModelScope/clip-vit-large-patch14). ``HF_TO_MODELSCOPE_REPOS`` handles that.
@@ -171,6 +173,13 @@ def enable_china_hub(*, force: bool = False) -> bool:
     if _PATCHED:
         return True
     if not force and hub_backend() != "modelscope":
+        return False
+
+    # ModelScope patches transformers.utils.hub unconditionally. GUI-only
+    # environments must skip before it partially mutates huggingface_hub.
+    try:
+        from transformers.utils import hub as _transformers_hub  # noqa: F401
+    except ImportError:
         return False
 
     try:

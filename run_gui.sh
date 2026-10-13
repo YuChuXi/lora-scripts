@@ -68,13 +68,9 @@ else
 fi
 
 if [ ! -f "vendor/sd-scripts/anima_train_network.py" ]; then
-    echo -e "\033[36m首次运行：正在初始化必要组件，请稍候...\033[0m"
-    git submodule update --init --recursive
-    if [ $? -ne 0 ]; then
-        echo -e "\033[31m组件初始化失败，请检查网络连接后重新运行。\033[0m"
-        exit 1
-    fi
-    echo -e "\033[32m初始化完成，继续启动...\033[0m"
+    echo -e "\033[31m缺少 vendor/sd-scripts/anima_train_network.py。\033[0m"
+    echo -e "\033[31m本仓库已不再使用 Git submodule；请重新完整 clone / 更新，或检查 vendor/sd-scripts 是否完整。\033[0m"
+    exit 1
 fi
 
 python gui.py "$@"

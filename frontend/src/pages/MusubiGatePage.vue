@@ -8,7 +8,10 @@ import EngineStatusBar from "../components/EngineStatusBar.vue"
 import TrainingPage from "./TrainingPage.vue"
 import { SCHEMA_META } from "../training/modules"
 
-withDefaults(defineProps<{ bare?: boolean }>(), { bare: false })
+const props = withDefaults(defineProps<{ bare?: boolean; schemaName?: string }>(), {
+  bare: false,
+  schemaName: "krea2-lora",
+})
 
 const status = ref<EngineStatus>({ id: "musubi", state: "unknown", featureEnabled: true })
 const loading = ref(false)
@@ -20,9 +23,9 @@ let logSource: EventSource | undefined
 let progressSource: EventSource | undefined
 
 const { t } = useI18n()
-const meta = SCHEMA_META["krea2-lora"]
-const title = computed(() => t(meta.titleKey))
-const area = computed(() => t(meta.areaKey))
+const meta = computed(() => SCHEMA_META[props.schemaName] ?? SCHEMA_META["krea2-lora"])
+const title = computed(() => t(meta.value.titleKey))
+const area = computed(() => t(meta.value.areaKey))
 const ready = computed(() => status.value.state === "ready")
 const working = computed(() => ["installing", "auditing"].includes(status.value.state))
 const label = computed(() => {
@@ -53,7 +56,7 @@ function closeStreams() {
 
 function streams(taskId: string, logUrl?: string, progressUrl?: string) {
   closeStreams()
-  logSource = new EventSource(logUrl || `/api/plugins/musubi/install/log/stream/${taskId}`)
+  logSource = new EventSource(logUrl || `/api/engines/musubi/install/log/stream/${taskId}`)
   logSource.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
@@ -63,7 +66,7 @@ function streams(taskId: string, logUrl?: string, progressUrl?: string) {
       logs.value.push(event.data)
     }
   }
-  progressSource = new EventSource(progressUrl || `/api/plugins/musubi/install/progress/stream/${taskId}`)
+  progressSource = new EventSource(progressUrl || `/api/engines/musubi/install/progress/stream/${taskId}`)
   progressSource.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
@@ -133,7 +136,7 @@ onBeforeUnmount(() => {
     v-if="ready"
     :title="title"
     :area="area"
-    schema-name="krea2-lora"
+    :schema-name="schemaName"
     :bare="bare"
   >
     <template #form-top>

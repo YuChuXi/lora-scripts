@@ -412,6 +412,17 @@
   border-radius: 50%;
 }
 
+.home-portable-tip {
+  margin: 10px 2px 0;
+  padding: 8px 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent, #3b82f6) 8%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .home-credit {
   margin: 14px 2px 0;
   color: var(--text-faint);

@@ -15,6 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from mikazuki.networking.http import open_url
 from mikazuki.log import log
 
 GITHUB_REPO = "wochenlong/lora-scripts-next"
@@ -33,10 +34,15 @@ MODELSCOPE_RELEASE_URL = "https://www.modelscope.cn/datasets/next-lab/release"
 
 
 def local_version() -> str:
-    """Read version from VERSION file, fall back to git describe."""
+    """Read version from VERSION file, fall back to git describe.
+
+    utf-8-sig: a BOM-prefixed VERSION (PowerShell 5.1 / Notepad default) must
+    not leak into the version string (same failure class as the marketplace
+    host-version read, rc.4 live acceptance V30).
+    """
     version_file = Path(__file__).resolve().parent.parent / "VERSION"
     if version_file.is_file():
-        v = version_file.read_text(encoding="utf-8").strip()
+        v = version_file.read_text(encoding="utf-8-sig").strip()
         if v:
             return v
 
@@ -176,7 +182,7 @@ def check_update(*, force: bool = False) -> dict:
                 "User-Agent": "Next-Trainer",
             },
         )
-        with urllib.request.urlopen(req, timeout=12) as resp:
+        with open_url(req, timeout=12) as resp:
             data = json.loads(resp.read().decode("utf-8"))
 
         if not isinstance(data, list):

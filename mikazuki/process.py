@@ -11,9 +11,9 @@ from typing import Any, Optional
 _VALID_ACCELERATE_MIXED_PRECISION = frozenset({"no", "fp16", "bf16"})
 
 from mikazuki.app.models import APIResponse
-from mikazuki.anima_fast_backend.launcher import build_launch_spec
-from mikazuki.anima_fast_backend.service_resolver import default_resolver
-from mikazuki.musubi_backend.launcher import (
+from mikazuki.engines.anima_fast.launcher import build_launch_spec
+from mikazuki.engines.anima_fast.service_resolver import default_resolver
+from mikazuki.engines.musubi.launcher import (
     build_cache_latents_spec,
     build_cache_text_encoder_spec,
     build_train_spec,
@@ -105,8 +105,13 @@ def build_accelerate_train_command(
     toml_path: str,
     cpu_threads: int = 2,
     gpu_ids: Optional[list] = None,
+    python_executable: Optional[str] = None,
 ) -> tuple[list[str], dict[str, str], Optional[str]]:
-    """Build accelerate launch argv and env for sd-scripts training."""
+    """Build accelerate launch argv and env for sd-scripts training.
+
+    ``python_executable`` selects the interpreter; the kohya pack passes its
+    independent venv python, the default keeps the historical GUI-env behavior.
+    """
     launch_opts = [
         "--num_cpu_threads_per_process",
         str(cpu_threads),
@@ -116,9 +121,15 @@ def build_accelerate_train_command(
     if mixed_precision:
         launch_opts.extend(["--mixed_precision", mixed_precision])
 
+    if gpu_ids and len(gpu_ids) > 1:
+        multi_gpu_args = ["--multi_gpu", "--num_processes", str(len(gpu_ids))]
+        if sys.platform == "win32":
+            multi_gpu_args = ["--rdzv_backend", "c10d", *multi_gpu_args]
+        launch_opts.extend(multi_gpu_args)
+
     launch_entry = Path(__file__).resolve().parent / "accelerate_launch.py"
     args = [
-        sys.executable,
+        python_executable or sys.executable,
         str(launch_entry),
         *launch_opts,
         trainer_file,
@@ -153,12 +164,8 @@ def build_accelerate_train_command(
 
     if gpu_ids:
         customize_env["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
-        if len(gpu_ids) > 1:
-            multi_gpu_args = ["--multi_gpu", "--num_processes", str(len(gpu_ids))]
-            if sys.platform == "win32":
-                customize_env["USE_LIBUV"] = "0"
-                multi_gpu_args = ["--rdzv_backend", "c10d", *multi_gpu_args]
-            args[3:3] = multi_gpu_args
+        if len(gpu_ids) > 1 and sys.platform == "win32":
+            customize_env["USE_LIBUV"] = "0"
 
     return args, customize_env, mixed_precision
 
@@ -208,7 +215,8 @@ def run_train(toml_path: str,
               trainer_file: str = "./scripts/train_network.py",
               gpu_ids: Optional[list] = None,
               cpu_threads: Optional[int] = 2,
-              metadata: Optional[dict] = None):
+              metadata: Optional[dict] = None,
+              python_executable: Optional[str] = None):
     log.info(f"Training started with config file / 训练开始，使用配置文件: {toml_path}")
     cpu_threads = cpu_threads or 2
     args, customize_env, mixed_precision = build_accelerate_train_command(
@@ -216,6 +224,7 @@ def run_train(toml_path: str,
         toml_path=toml_path,
         cpu_threads=cpu_threads,
         gpu_ids=gpu_ids,
+        python_executable=python_executable,
     )
 
     if mixed_precision:
@@ -284,10 +293,17 @@ def run_musubi_train(toml_path: str,
                      runtime,
                      values: dict,
                      gpu_ids: Optional[list] = None,
-                     metadata: Optional[dict] = None):
-    """Launch a musubi-tuner Krea 2 run: cache latents -> cache TE outputs -> train."""
-    from mikazuki.model_assets import krea2_tokenizer_dir, patch_krea2_tokenizer_path
+                     metadata: Optional[dict] = None,
+                     family: Optional[str] = None):
+    """Launch a musubi-tuner run: cache latents -> cache TE outputs -> train."""
+    from mikazuki.engines.musubi.families import cache_extra_args, family_for
+    from mikazuki.model_assets import (
+        patch_ideogram4_source,
+        patch_krea2_tokenizer_path,
+        tokenizer_dir_for,
+    )
 
+    spec = family_for(family)
     log.info(f"musubi-tuner training started with config file / musubi 训练开始，使用配置文件: {toml_path}")
     if gpu_ids:
         log.info(f"Using GPU(s) / 使用 GPU: {gpu_ids}")
@@ -298,20 +314,26 @@ def run_musubi_train(toml_path: str,
                 gpu_ids[0],
                 gpu_ids[0],
             )
-    patch_krea2_tokenizer_path(runtime.musubi_root, krea2_tokenizer_dir(runtime.lora_next_root), log=log.info)
+    tokenizer_dir = tokenizer_dir_for(spec.train_type, runtime.lora_next_root)
+    if spec.family == "krea2":
+        patch_krea2_tokenizer_path(runtime.musubi_root, tokenizer_dir, log=log.info)
+    else:
+        patch_ideogram4_source(runtime.musubi_root, tokenizer_dir, log=log.info)
     train_task_id = str(uuid.uuid4())
     dataset_toml = Path(str(values["dataset_config"]))
     cache_latents_spec = build_cache_latents_spec(
-        runtime, dataset_toml, str(values["vae"]), f"{train_task_id}-cache_latents", gpu_ids
+        runtime, dataset_toml, str(values["vae"]), f"{train_task_id}-cache_latents", gpu_ids,
+        family=spec.family, extra_args=cache_extra_args(spec, "cache_latents", values),
     )
     cache_te_spec = build_cache_text_encoder_spec(
-        runtime, dataset_toml, str(values["text_encoder"]), f"{train_task_id}-cache_text_encoder", gpu_ids
+        runtime, dataset_toml, str(values["text_encoder"]), f"{train_task_id}-cache_text_encoder", gpu_ids,
+        family=spec.family, extra_args=cache_extra_args(spec, "cache_text_encoder", values),
     )
-    train_spec = build_train_spec(runtime, Path(toml_path), train_task_id, gpu_ids)
+    train_spec = build_train_spec(runtime, Path(toml_path), train_task_id, gpu_ids, family=spec.family)
 
     base_metadata = {
         "backend": "musubi",
-        "train_type": "krea2-lora",
+        "train_type": spec.train_type,
         "config_path": str(Path(toml_path).resolve()),
         "dataset_config": str(dataset_toml.resolve()),
         "musubi_root": str(runtime.musubi_root),
@@ -417,5 +439,59 @@ def run_anima_fast_train(toml_path: str,
             "train_log_stream_url": urls["stream"],
             "metadata": task_metadata,
             "log_file": str(log_file),
+        },
+    )
+
+
+def run_ai_toolkit_train(config_yaml: str,
+                         runtime,
+                         variant: str,
+                         gpu_ids: Optional[list] = None,
+                         metadata: Optional[dict] = None,
+                         te_path: str = ""):
+    """Launch an ai-toolkit run: single-stage driver -> `run.py <config.yaml>`."""
+    from mikazuki.engines.ai_toolkit.launcher import build_train_spec as build_ai_toolkit_train_spec
+
+    log.info(f"ai-toolkit training started with config file / ai-toolkit 训练开始，使用配置文件: {config_yaml}")
+    if gpu_ids:
+        log.info(f"Using GPU(s) / 使用 GPU: {gpu_ids}")
+    task_id = str(uuid.uuid4())
+    spec = build_ai_toolkit_train_spec(runtime, Path(config_yaml), task_id, gpu_ids, te_path=te_path)
+    task_metadata = {
+        "backend": "ai-toolkit",
+        "train_type": f"{variant}-lora",
+        "config_path": str(Path(config_yaml).resolve()),
+        "toolkit_root": str(runtime.toolkit_root),
+        "toolkit_python": str(runtime.python),
+        "command": [str(part) for part in spec.command],
+    }
+    task_metadata.update(metadata or {})
+    task_metadata["job_label"] = f"ai-toolkit {variant} training"
+
+    task = tm.create_task(spec.command, spec.env, metadata=task_metadata, cwd=str(spec.cwd), task_id=task_id)
+    queued = task.status == TaskStatus.QUEUED
+    tm.submit(task)
+
+    urls = build_train_log_urls(task.task_id)
+    _announce_train_log(task.task_id, urls)
+
+    message = (
+        f"ai-toolkit training queued / ai-toolkit 训练已加入队列 ID: {task.task_id}"
+        if queued else
+        f"ai-toolkit training started / ai-toolkit 训练开始 ID: {task.task_id}"
+    )
+    return APIResponse(
+        status="success",
+        message=message,
+        data={
+            "task_id": task.task_id,
+            "queued": queued,
+            "train_log_path": "/train-log",
+            "train_log_query": f"task_id={task.task_id}",
+            "train_log_stream": f"/api/train/log/stream/{task.task_id}",
+            "train_log_url": urls["viewer"],
+            "train_log_stream_url": urls["stream"],
+            "metadata": task_metadata,
+            "config_path": task_metadata["config_path"],
         },
     )

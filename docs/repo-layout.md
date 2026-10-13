@@ -9,7 +9,7 @@
 | `gui.py` | 服务主程序 |
 | `setup_environment.py` | 整合包首次安装（`Next-Trainer/setup_environment.py`） |
 | `run_gui.bat` | Windows 主入口（整合包根目录 + 源码） |
-| `Download-Anima-Model.bat` | 一键下载 Anima 三件套到 `sd-models/anima/`（整合包根 / 源码根） |
+| Download-Anima-Model.bat | 一键下载 Anima 三件套到 sd-models/anima/（源码根；**2026 整合包在 	ools/**） |
 | `requirements.txt` / `VERSION` | 依赖与版本 |
 | `config/anima_fast_backend.toml` | Fast 插件默认路径（输出 / 日志 / cache） |
 | `config/anima_fast_environment/` | Fast 插件 venv 约束与 overrides（cu130） |
@@ -19,7 +19,7 @@
 | 路径 | 原因 |
 |------|------|
 | `extensions/anima_lora/` | 页内安装器写入；**整合包不预装** `.venv`（见 `docs/portable-packaging-git-update.md`） |
-| `mikazuki/anima_fast_backend/` | Fast 路由、安装器、监控适配（主仓代码） |
+| `mikazuki/engines/anima_fast/` | Fast 引擎包：路由、安装器、监控适配（主仓代码） |
 
 ### 整合包（Portable 7z）
 

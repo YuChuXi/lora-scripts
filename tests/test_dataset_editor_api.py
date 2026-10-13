@@ -174,12 +174,17 @@ def test_dataset_editor_batch_prepend_appends_tags_at_front(tmp_path):
     payload = response.json()
     assert payload["status"] == "success"
     assert payload["data"]["changed"] == 2
+    # Merge note (dev + feat): both branches had independently added this test
+    # with different front-append semantics. The merged code follows the
+    # feat-side semantics (requested tags form the ordered prefix; existing
+    # occurrences are removed, see dataset_editor.batch_edit), so both
+    # assertions use the prefix-slot expectation.
     assert (tmp_path / "alpha.txt").read_text(
         encoding="utf-8"
     ) == "masterpiece, best quality, 1girl, solo"
     assert (tmp_path / "beta.txt").read_text(
         encoding="utf-8"
-    ) == "best quality, 1girl, masterpiece, solo"
+    ) == "masterpiece, best quality, 1girl, solo"
 
 
 def test_dataset_editor_batch_cleans_obvious_caption_noise(tmp_path):
@@ -331,19 +336,22 @@ def test_dataset_editor_rejects_path_escape(tmp_path):
     assert "outside dataset" in response.json()["detail"]
 
 
-def test_legacy_gradio_tageditor_starts_by_default_for_existing_users():
+def test_legacy_gradio_tageditor_is_removed():
     gui = (ROOT / "gui.py").read_text(encoding="utf-8")
+    proxy = (ROOT / "mikazuki" / "app" / "proxy.py").read_text(encoding="utf-8")
 
-    assert "--enable-legacy-tageditor" in gui
-    assert "legacy_tageditor_enabled = not args.disable_tageditor" in gui
-    assert "run_tag_editor(tageditor_port)" in gui
+    assert "enable-legacy-tageditor" not in gui
+    assert "run_tag_editor" not in gui
+    assert "dataset-tag-editor" not in gui
+    assert "/proxy/tageditor" not in proxy
+    assert "MIKAZUKI_TAGEDITOR_PORT" not in gui
 
 
 def test_dataset_editor_vue_source_exposes_enhanced_workflow():
     source = (ROOT / "frontend/src/pages/DatasetEditorPage.vue").read_text(encoding="utf-8")
     api = (ROOT / "frontend/src/api/dataset.ts").read_text(encoding="utf-8")
 
-    for marker in ("selectedPaths", "togglePageSelection", "quickTags", "pageSize", "replaceFrom", "sessionHistory"):
+    for marker in ("selectedPaths", "clearSelection", "selectCurrentPageOnly", "tagFilter", "pageSize", "replaceFrom", "sessionHistory",):
         assert marker in source
     for endpoint in ("/batch", "/undo", "/redo", "/history"):
         assert endpoint in api

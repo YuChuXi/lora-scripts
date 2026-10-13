@@ -11,13 +11,12 @@ The WebUI starts several local services. Their default ports are not stable URLs
 - Main WebUI: `28000`
 - TensorBoard: default `6006`, may fall back
 - Train monitor: default `6008`, may fall back
-- Tag editor: default `28001`, may fall back
 
 Rules:
 
 - Do not hardcode `http://127.0.0.1:6008` as a train monitor entry in frontend files, docs, launchers, or packaging patches.
 - Use `/train-monitor` for train monitor links. The backend redirects using `TRAIN_MONITOR_PORT`.
-- Read TensorBoard from `MIKAZUKI_TENSORBOARD_PORT`, train monitor from `TRAIN_MONITOR_PORT`, and tag editor from `MIKAZUKI_TAGEDITOR_PORT`.
+- Read TensorBoard from `MIKAZUKI_TENSORBOARD_PORT`, train monitor from `TRAIN_MONITOR_PORT`.
 - Port allocation must protect every enabled service's default port before fallback scanning. TensorBoard must not be allowed to claim `6008` as a fallback while the train monitor is enabled.
 - In `gui.py`, after selecting fallback ports, write env vars before starting child services or the main WebUI.
 - The train monitor must validate its GUI API target. If inherited `MIKAZUKI_PORT` points at TensorBoard or another stale service, it should fall back to the main WebUI default (`28000`) rather than reporting a misleading port-specific error.

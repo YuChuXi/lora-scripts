@@ -60,7 +60,7 @@ Windows 上启用 `torch_compile` 时，`torch.compile` 默认走 `inductor` 后
 `build-scripts/templates/Update-SD-Trainer.bat`（同步到整合包根目录）：
 1. **多路 fetch**：直连 → `ghfast.top` → `ghproxy` → `gitmirror` 依次尝试
 2. **浅克隆加深**：检测到 shallow 仓库时 `--deepen=50`，减少 fast-forward 失败
-3. **子模块容错**：`dataset-tag-editor` 子模块同样支持镜像；目录已存在时跳过重复 clone
+3. **（历史）子模块容错**：旧版更新脚本曾对 `dataset-tag-editor` 子模块做镜像回退；该子模块已从主线移除
 4. **失败排障**：全部失败后打印代理/VPN/手动下载 Release 等建议
 
 详见仓库 `CHANGELOG.md` v2.5.2「整合包修复」一节。

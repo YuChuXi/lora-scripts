@@ -5,7 +5,9 @@ import re
 import shutil
 import sys
 import json
-from typing import Dict
+from typing import Dict, Optional
+
+import toml
 
 from mikazuki.log import log
 
@@ -266,6 +268,35 @@ def read_safetensors_metadata(path) -> Dict:
         return json.loads(meta)
 
 
+# vendor/sd-scripts/library/anima_utils.py builds the Anima DiT with num_blocks=28;
+# a 2.9B checkpoint carries more blocks and can only be trained by Anima Fast (#408).
+KOHYA_ANIMA_MAX_BLOCKS = 28
+
+
+def anima_checkpoint_block_count(path) -> Optional[int]:
+    """DiT block count from a safetensors header, or None when unreadable / not Anima.
+
+    Reads only the JSON header: cheap, and never loads weights or touches the GPU.
+    """
+    try:
+        metadata = read_safetensors_metadata(path)
+    except Exception:  # noqa: BLE001 - a broken header simply means "cannot tell"
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    highest = None
+    for key in metadata:
+        if not isinstance(key, str):
+            continue
+        match = re.match(r"^blocks\.(\d+)\.", key)
+        if match is None:
+            continue
+        index = int(match.group(1))
+        if highest is None or index > highest:
+            highest = index
+    return None if highest is None else highest + 1
+
+
 def guess_model_type(path):
     if path.endswith("safetensors"):
         metadata = read_safetensors_metadata(path)
@@ -284,6 +315,21 @@ def guess_model_type(path):
 
 def validate_model(model_name: str, training_type: str = "sd-lora"):
     if training_type in ["anima-lora", "sd3-lora", "anima-finetune"]:
+        # vendor/sd-scripts/library/anima_utils.py hardcodes num_blocks=28, so an
+        # Anima 2.9B checkpoint only fails later with a wall of "Unexpected keys ...
+        # blocks.28.*" names. Detect it from the safetensors header (no weights, no
+        # GPU) and point the user at the engine that supports it (#408).
+        if os.path.isfile(model_name) and str(model_name).lower().endswith(".safetensors"):
+            try:
+                blocks = anima_checkpoint_block_count(model_name)
+            except Exception as exc:  # noqa: BLE001 - unreadable headers surface in the trainer
+                log.warning(f"Can't inspect model file {model_name}: {exc}")
+                blocks = None
+            if blocks is not None and blocks > KOHYA_ANIMA_MAX_BLOCKS:
+                return False, (
+                    f"检测到 Anima 2.9B 底模（{blocks} 个 block），Kohya 引擎不支持该规格。"
+                    "请改用 Anima Fast 引擎（可在「设置 → 训练引擎」中安装），或改用 Anima 2B 底模。"
+                )
         return True, "ok"
 
     if os.path.exists(model_name):
@@ -323,7 +369,14 @@ def validate_model(model_name: str, training_type: str = "sd-lora"):
     return False, "model not found"
 
 
-def validate_data_dir(path):
+def validate_data_dir(path, auto_organize=True):
+    """Check that ``path`` can act as a kohya-style dataset root.
+
+    When no ``N_xxx`` subdirectory exists and ``auto_organize`` is set, loose
+    images are moved into a generated one. Pass ``auto_organize=False`` whenever
+    something else owns the dataset layout (a ``dataset_config`` toml): moving
+    files would leave its ``image_dir`` entries pointing at emptied directories.
+    """
     if not os.path.exists(path):
         log.error(f"Data dir {path} not exists, check your params")
         return False
@@ -344,26 +397,154 @@ def validate_data_dir(path):
         log.info(f"Found {len(ok_dir)} legal dataset")
         return True
 
-    if len(ok_dir) == 0:
-        log.warning(f"No leagal dataset found. Try find avaliable images")
-        imgs = get_total_images(path, False)
-        captions = glob.glob(path + '/*.txt')
-        log.info(f"{len(imgs)} images found, {len(captions)} captions found")
-        if len(imgs) > 0:
-            num_repeat = suggest_num_repeat(len(imgs))
-            dataset_path = os.path.join(path, f"{num_repeat}_zkz")
-            os.makedirs(dataset_path)
-            for i in imgs:
-                shutil.move(i, dataset_path)
-            if len(captions) > 0:
-                for c in captions:
-                    shutil.move(c, dataset_path)
-            log.info(f"Auto dataset created {dataset_path}")
-        else:
-            log.error("No image found in data dir")
-            return False
+    if not auto_organize:
+        if get_total_images(path, True):
+            log.info(f"Data dir {path} has no N_xxx subdir; leaving layout to the dataset config")
+            return True
+        log.error("No image found in data dir")
+        return False
+
+    log.warning(f"No leagal dataset found. Try find avaliable images")
+    imgs = get_total_images(path, False)
+    captions = glob.glob(path + '/*.txt')
+    log.info(f"{len(imgs)} images found, {len(captions)} captions found")
+    if len(imgs) > 0:
+        num_repeat = suggest_num_repeat(len(imgs))
+        dataset_path = os.path.join(path, f"{num_repeat}_zkz")
+        os.makedirs(dataset_path)
+        for i in imgs:
+            shutil.move(i, dataset_path)
+        if len(captions) > 0:
+            for c in captions:
+                shutil.move(c, dataset_path)
+        log.warning(
+            f"Auto dataset created: moved {len(imgs)} images and {len(captions)} captions "
+            f"into {dataset_path} / 已把 {len(imgs)} 张图片与 {len(captions)} 个标签文件移动到 {dataset_path}"
+        )
+    else:
+        log.error("No image found in data dir")
+        return False
 
     return True
+
+
+# Mirror sd-scripts' library/train_util.py IMAGE_EXTENSIONS. Using our narrower
+# jpg/jpeg/png set here would reject a valid .webp dataset.
+DATASET_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+
+
+def count_subset_images(image_dir):
+    """Count images the way sd-scripts' ``glob_images`` does: non-recursively."""
+    if not os.path.isdir(image_dir):
+        return 0
+    total = 0
+    for entry in os.scandir(image_dir):
+        if entry.is_file() and os.path.splitext(entry.name)[1].lower() in DATASET_IMAGE_EXTENSIONS:
+            total += 1
+    return total
+
+
+def _describe_subset_dir(image_dir, config_dir):
+    """Return None when the subset is usable, else why sd-scripts will skip it.
+
+    Relative paths are resolved exactly as sd-scripts does -- as given, i.e.
+    against the training process' working directory -- because resolving them
+    more generously here would let the preflight pass on a subset that training
+    still skips, which is the whole failure we are trying to catch.
+    """
+    if not os.path.isdir(image_dir):
+        if not os.path.isabs(image_dir) and count_subset_images(os.path.join(config_dir, image_dir)) > 0:
+            return "目录不存在 / missing（相对路径按训练器工作目录解析，请改用绝对路径）"
+        return "目录不存在 / missing"
+
+    if count_subset_images(image_dir) == 0:
+        if not os.path.isabs(image_dir) and count_subset_images(os.path.join(config_dir, image_dir)) > 0:
+            return "目录里没有图片 / no images（相对路径按训练器工作目录解析，请改用绝对路径）"
+        return "目录里没有图片 / no images"
+
+    return None
+
+
+def validate_dataset_config(dataset_config):
+    """Reject a dataset toml whose subsets sd-scripts would silently skip.
+
+    sd-scripts logs a single warning per skipped subset and then trains on
+    whatever subsets are left, so a wrong ``image_dir``, a ``num_repeats``
+    below 1, or a duplicated ``image_dir`` / ``metadata_file`` produces a run
+    that completes normally, emits checkpoints, and quietly trained on a
+    fraction of the data. Fail the submit instead.
+
+    Returns ``(ok, message)``.
+    """
+    config_path = os.path.abspath(str(dataset_config).strip())
+    if not os.path.isfile(config_path):
+        return False, f"数据集配置文件不存在 / dataset_config not found: {dataset_config}"
+
+    try:
+        parsed = toml.load(config_path)
+    except Exception as e:
+        return False, f"数据集配置文件解析失败 / cannot parse dataset_config: {dataset_config} ({e})"
+
+    subsets = []
+    datasets = parsed.get("datasets")
+    if isinstance(datasets, list):
+        for dataset in datasets:
+            if not isinstance(dataset, dict):
+                continue
+            entries = dataset.get("subsets")
+            if isinstance(entries, list):
+                subsets.extend(s for s in entries if isinstance(s, dict))
+
+    if not subsets:
+        return False, (
+            f"数据集配置里没有任何 [[datasets.subsets]] / no dataset subsets defined: {dataset_config}"
+        )
+
+    config_dir = os.path.dirname(config_path)
+    problems = []
+    checked = 0
+    seen_keys = set()
+    for index, subset in enumerate(subsets, 1):
+        image_dir = str(subset.get("image_dir") or "").strip()
+        metadata_file = str(subset.get("metadata_file") or "").strip()
+        key = image_dir or metadata_file
+        label = key or f"第 {index} 个子集 / subset #{index}"
+
+        # sd-scripts checks num_repeats first and registers only surviving
+        # subsets (train_util.py prepare_images), so a subset skipped here
+        # cannot shadow a later duplicate of itself. Omitting num_repeats
+        # defaults to 1 (config_util.py BaseSubsetParams); a non-int value
+        # already fails the toml schema check, so only int < 1 skips silently.
+        num_repeats = subset.get("num_repeats")
+        if isinstance(num_repeats, int) and num_repeats < 1:
+            problems.append(f"{label}（num_repeats={num_repeats} 小于 1，sd-scripts 会忽略整个子集）")
+            continue
+
+        if key:
+            if key in seen_keys:
+                problems.append(f"{label}（重复子集，sd-scripts 只保留第一个 / duplicated subset is ignored）")
+                continue
+            seen_keys.add(key)
+
+        if not image_dir:
+            # metadata_file-driven finetune subsets carry their own image list.
+            continue
+        checked += 1
+        problem = _describe_subset_dir(image_dir, config_dir)
+        if problem:
+            problems.append(f"{image_dir}（{problem}）")
+
+    if problems:
+        listed = "\n".join(f"  - {item}" for item in problems)
+        return False, (
+            "数据集配置中以下子集会被 sd-scripts 静默跳过，训练看起来正常但这部分数据不会被训练：\n"
+            f"{listed}\n"
+            "请检查 dataset_config。注意 sd-scripts 只扫描该目录下的图片，不递归子目录；"
+            "num_repeats 必须 ≥1；重复的 image_dir / metadata_file 只保留第一个。"
+        )
+
+    log.info(f"Dataset config {config_path} validated: {checked} image subset(s) have images")
+    return True, "ok"
 
 
 def suggest_num_repeat(img_count):

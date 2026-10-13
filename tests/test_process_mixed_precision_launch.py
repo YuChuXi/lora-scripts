@@ -24,8 +24,8 @@ _STUBBED_MODULE_NAMES = (
     "mikazuki.launch_utils",
     "mikazuki.portable_utils",
     "toml",
-    "mikazuki.anima_fast_backend.launcher",
-    "mikazuki.anima_fast_backend.service_resolver",
+    "mikazuki.engines.anima_fast.launcher",
+    "mikazuki.engines.anima_fast.service_resolver",
     "mikazuki.process",
 )
 _SAVED_MODULES: dict[str, types.ModuleType | None] = {}
@@ -97,13 +97,13 @@ def _install_stub_modules() -> None:
         toml_mod.loads = _simple_toml_loads
         sys.modules["toml"] = toml_mod
 
-    fast_mod = types.ModuleType("mikazuki.anima_fast_backend.launcher")
+    fast_mod = types.ModuleType("mikazuki.engines.anima_fast.launcher")
     fast_mod.build_launch_spec = mock.MagicMock()
-    sys.modules["mikazuki.anima_fast_backend.launcher"] = fast_mod
+    sys.modules["mikazuki.engines.anima_fast.launcher"] = fast_mod
 
-    resolver_mod = types.ModuleType("mikazuki.anima_fast_backend.service_resolver")
+    resolver_mod = types.ModuleType("mikazuki.engines.anima_fast.service_resolver")
     resolver_mod.default_resolver = mock.MagicMock()
-    sys.modules["mikazuki.anima_fast_backend.service_resolver"] = resolver_mod
+    sys.modules["mikazuki.engines.anima_fast.service_resolver"] = resolver_mod
 
     sys.modules.pop("mikazuki.process", None)
 
@@ -160,20 +160,107 @@ class BuildAccelerateTrainCommandTests(unittest.TestCase):
         self.assertIsNone(mp)
         self.assertNotIn("--mixed_precision", args)
 
-    def test_multi_gpu_inserts_before_launch_options(self):
+    def _assert_launch_opts_intact(self, args, trainer_file):
+        """Every launch option must keep its flag/value pairs intact and sit
+        before the trainer script (regression for issue #324, where multi-gpu
+        args were spliced into the middle of `--num_cpu_threads_per_process`'s
+        value)."""
+        trainer_idx = args.index(trainer_file)
+        launch_opts = args[2:trainer_idx]
+
+        threads_idx = launch_opts.index("--num_cpu_threads_per_process")
+        self.assertTrue(launch_opts[threads_idx + 1].isdigit())
+
+        # No option token may be immediately followed by another known flag
+        # when a value is expected.
+        for flag_with_value in ("--num_cpu_threads_per_process", "--num_processes", "--mixed_precision"):
+            if flag_with_value in launch_opts:
+                idx = launch_opts.index(flag_with_value)
+                self.assertFalse(launch_opts[idx + 1].startswith("--"))
+        return launch_opts
+
+    def test_multi_gpu_launch_opts_structure(self):
+        trainer = "./scripts/stable/train_network.py"
         with tempfile.TemporaryDirectory() as tmp:
             toml_path = Path(tmp) / "train.toml"
             toml_path.write_text('mixed_precision = "bf16"\n', encoding="utf-8")
             args, env, _mp = process.build_accelerate_train_command(
-                trainer_file="./scripts/stable/train_network.py",
+                trainer_file=trainer,
                 toml_path=str(toml_path),
                 gpu_ids=["0", "1"],
             )
 
-        self.assertIn("--multi_gpu", args)
-        self.assertIn("--mixed_precision", args)
-        self.assertLess(args.index("--multi_gpu"), args.index("--mixed_precision"))
+        launch_opts = self._assert_launch_opts_intact(args, trainer)
+        self.assertIn("--multi_gpu", launch_opts)
+        num_proc_idx = launch_opts.index("--num_processes")
+        self.assertEqual(launch_opts[num_proc_idx + 1], "2")
+        # Windows requires the c10d rendezvous backend for multi-process
+        # launch; other platforms use accelerate's default.
+        if process.sys.platform == "win32":
+            rdzv_idx = launch_opts.index("--rdzv_backend")
+            self.assertEqual(launch_opts[rdzv_idx + 1], "c10d")
+        else:
+            self.assertNotIn("--rdzv_backend", launch_opts)
         self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1")
+        if process.sys.platform == "win32":
+            self.assertEqual(env["USE_LIBUV"], "0")
+        else:
+            self.assertNotIn("USE_LIBUV", env)
+
+    def test_multi_gpu_windows_variant(self):
+        trainer = "./scripts/stable/train_network.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            toml_path = Path(tmp) / "train.toml"
+            toml_path.write_text('mixed_precision = "bf16"\n', encoding="utf-8")
+            with mock.patch.object(process.sys, "platform", "win32"):
+                args, env, _mp = process.build_accelerate_train_command(
+                    trainer_file=trainer,
+                    toml_path=str(toml_path),
+                    gpu_ids=["0", "1"],
+                )
+
+        launch_opts = self._assert_launch_opts_intact(args, trainer)
+        self.assertIn("--multi_gpu", launch_opts)
+        rdzv_idx = launch_opts.index("--rdzv_backend")
+        self.assertEqual(launch_opts[rdzv_idx + 1], "c10d")
+        self.assertEqual(env["USE_LIBUV"], "0")
+
+    def test_multi_gpu_opts_parse_with_accelerate_argparse(self):
+        """Smoke test: the assembled launch options must be accepted by
+        accelerate's real launch argument parser (issue #324)."""
+        pytest = importlib.import_module("pytest")
+        accelerate_launch = pytest.importorskip("accelerate.commands.launch")
+        trainer = "./scripts/stable/train_network.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            toml_path = Path(tmp) / "train.toml"
+            toml_path.write_text('mixed_precision = "bf16"\n', encoding="utf-8")
+            args, _env, _mp = process.build_accelerate_train_command(
+                trainer_file=trainer,
+                toml_path=str(toml_path),
+                gpu_ids=["0", "1"],
+            )
+
+        parser = accelerate_launch.launch_command_parser()
+        launch_opts = args[2 : args.index(trainer)]
+        ns = parser.parse_args([*launch_opts, trainer])
+        self.assertTrue(ns.multi_gpu)
+        self.assertEqual(ns.num_processes, 2)
+        self.assertEqual(ns.num_cpu_threads_per_process, 2)
+
+    def test_single_gpu_keeps_launch_opts_intact(self):
+        trainer = "./scripts/stable/train_network.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            toml_path = Path(tmp) / "train.toml"
+            toml_path.write_text('mixed_precision = "bf16"\n', encoding="utf-8")
+            args, env, _mp = process.build_accelerate_train_command(
+                trainer_file=trainer,
+                toml_path=str(toml_path),
+                gpu_ids=["0"],
+            )
+
+        launch_opts = self._assert_launch_opts_intact(args, trainer)
+        self.assertNotIn("--multi_gpu", launch_opts)
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0")
 
     def test_disables_colored_subprocess_output(self):
         with tempfile.TemporaryDirectory() as tmp:

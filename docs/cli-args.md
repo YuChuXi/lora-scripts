@@ -9,7 +9,6 @@
 | `--listen` | bool | `false` | 监听所有网卡（`0.0.0.0`） |
 | `--skip-prepare-environment` | bool | `false` | 跳过环境准备 |
 | `--disable-tensorboard` | bool | `false` | 禁用 TensorBoard |
-| `--disable-tageditor` | bool | `false` | 禁用标签编辑器 |
 | `--disable-train-monitor` | bool | `false` | 禁用训练监控页 |
 | `--tensorboard-host` | str | `127.0.0.1` | TensorBoard 主机 |
 | `--tensorboard-port` | int | `6006` | TensorBoard 端口 |

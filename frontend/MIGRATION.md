@@ -69,7 +69,7 @@
 - 恢复 `configs-{type}` 历史与 `configs-{type}-autosave` 草稿，接入后端 `/api/presets` 训练预设。
 - TOML/JSON 导入先调用 `/api/config/validate-import`，支持训练类型识别和跨页面跳转；导出调用 `/api/config/normalize-for-export` 后生成 TOML。
 - 参数面板显示实际提交 TOML，提交前执行 Schema 校验、旧参数冲突检查和确认；成功后展示 task id、同源日志入口和任务页入口。
-- Anima Fast 提交前额外调用 `/api/anima-fast/preflight`，后端 `/api/run` 继续执行 feature flag、ready、audit 漂移和最终 preflight gate。
+- Anima Fast 提交前额外调用 `/api/engines/anima-fast/preflight`，后端 `/api/run` 继续执行 feature flag、ready、audit 漂移和最终 preflight gate。
 
 ### 2026-07-28：数据集增强与生产托管测试
 
@@ -101,6 +101,23 @@
 - Element Plus 改为显式按需组件注册，全部页面改为路由动态导入；公共 JS 从约 1.1 MB 降至约 318 KB，并移除 Vite chunk size warning。
 - 新增 Node 22 锁定的 `00-build-frontend.ps1`，两个 Windows 便携构建入口均在复制项目之前执行 `npm ci` 和完整前端检查/构建。
 - Playwright 业务流程需要后端或稳定 mock 服务联调，本阶段暂不实施。
+
+### 2026-08-28：插件市场页接入实时 catalog（Goal v9 / CR-011 实测修复）
+
+- `pluginsApi` 新增 `listMarketplaceCatalog()`（`GET /api/marketplace/catalog`，只读，失败/离线返回空列表）。
+- `MarketplaceSettingsPage.vue`：加载时同时拉取实时 catalog 与已安装状态；实时 catalog 非空时优先使用，否则回退到注入的 `catalogEntries` prop（既有测试与注入式用法不变）。
+- 零权限插件（`permissions_summary: []`，如 next-trainer-pi-agent 0.2.0）现在可直接安装：`allPermissionsApproved` 对空权限集合按 vacuously true 处理（原先要求至少一个权限，导致无权限插件的安装按钮永远禁用）。
+- `catalogUnavailable` 提示仅在实时 catalog 与注入条目都为空时显示。
+- 验证：Node 22.17.1 `npm run check`（typecheck、ESLint、Vitest 含新增零权限/实时 catalog 用例、生产构建）。
+
+### 2026-08-28：插件 server 模式浮动对话框（Goal v9 / CR-011）
+
+- `PluginUiEntry` 新增可选 `mode`（`"static"` 默认 / `"server"`）；`/api/plugin-host/extensions` 的 `floatingPanel` 投影在运行时 READY 上报了 `uiUrl` 时为 `mode: "server"`，`entryUrl` 为宿主校验过的 `http://127.0.0.1:<port>` 根地址。
+- 新增 `isSafePluginServerUiUrl()`：只接受显式 `http://127.0.0.1:<port>`（含尾斜杠的根写法），拒绝其他主机名、https、凭据、路径、查询和非法端口。
+- `stores/extensions.ts`：`floatingExtensions` 按 mode 分别用静态/ server URL 策略过滤。
+- `GenericFloatingExtensionHost.vue`：server 模式直接加载运行时的环回地址，不创建 MessageChannel Bridge、不设置 `sandbox`（该页面是与自身源通信的完整应用，例如内嵌 pi-web）；静态模式行为不变（`sandbox="allow-scripts"` + Bridge）。
+- 设置页无需改动：无 `settingsEntrypoint` 的插件继续显示“不可用”状态。
+- 验证：Node 22.17.1 `npm run check` 全绿（typecheck、ESLint 0 error、28 个测试文件、生产构建）。
 
 ## 已完成
 
@@ -170,6 +187,14 @@
 
 ## 变更记录规范
 
+### 2026-09-20 Issue #368：下载网络设置
+
+- 训练引擎与插件市场复用 `NetworkSettingsPanel`，读取/保存受宿主运行令牌保护的 `/api/network/settings`。
+- 网络配置持久化在服务端 `config/network.local.json`，不新增浏览器代理凭据存储；原下载镜像 localStorage 契约不变。
+- 自动、系统、手动和直连分别可选；安装进度附带线路、尝试次数与速率。新任务采用新配置，既有任务保持策略快照。
+- 前端类型、Lint、210 项测试和构建通过；Edge 桌面/390px 移动端预览验证了读取/保存与布局。后端 API 验证记录见 `docs/issues/368-network-policy-verification.md`。
+- 当前未构建新整合包，也未运行外部 Agent ZIP 工件测试；不将前端通过等同于发布验收完成。
+
 后续每个迁移 PR/提交在本文件追加：
 
 1. 迁移的页面或工作流。
@@ -177,3 +202,45 @@
 3. 与旧版的已知行为差异。
 4. 自动化及手工验证结果。
 5. 尚未解决的问题和优先级。
+
+
+### DiffSynth review integration
+
+Qwen-Image-2.1 now uses conditional directory/component inputs and image-TXT/native-metadata
+inputs through the shared schema adapter. Existing directory-only drafts remain compatible
+with the directory default. PreviewSampleField was adapted from the author's Klein branch
+for t2i samples; task previews, server path picking and config history reuse existing APIs.
+DiffSynth bypasses Kohya-specific parameter conversion; inactive schema fields are omitted.
+No training-page model download/probe widget is shown. CPU model offload + sampling is
+explicitly unavailable for the pinned upstream runner; see docs/diffsynth.md.
+
+
+### DiffSynth shared frontend contract merge (fork PR #1)
+
+Replaced the t2i-only PreviewSampleField copy with the author's shared component,
+Sample codec, translations and optional reference-path component. The existing SchemaField
+role mounts it with Qwen numeric limits; editing remains disabled. Removed the superseded
+global preview CSS in favor of the shared component styles. Existing sample_enabled
+configs and samples without controlImages remain compatible; the backend accepts an empty
+reference list and rejects actual edit inputs. See docs/team/diffsynth-frontend-contract.md
+for the proposal-to-current-API mapping and outstanding real-training acceptance.
+
+Validation: Node 22 `npm run check` passed (221 tests, typecheck, lint, production build);
+related backend regression: 27 passed, 3 skipped (optional torch/DiffSynth dependencies).
+No browser interaction or GPU training was performed for this merge.
+
+### Dataset source selection (2026-10-07)
+
+The editor and tagger share one dataset selector with existing-dataset and new-dataset
+tabs. Both pages retain directly editable folder paths. Browsing uses the shared
+native-first picker for local hosts (respecting the explicit picker preference),
+with the web picker available for remote hosts or unavailable desktop dialogs.
+Folder browsing and pasted paths remain server-side paths; selection requires
+confirmation. The editor shows change/unload only after a successful scan, including
+empty datasets. Unload clears session state, not files, and confirms unsaved drafts.
+The editor source row is separate from filtering and batch actions. The source dialog
+and nested server browser are teleported to avoid toolbar clipping.
+
+The dataset list menu is limited to manage, rename and delete. Upload, ZIP export,
+tagging, caption editing and copy/preprocessing are available inside the detail page.
+Copy retains directory layout, Kohya repeats and transparency options.

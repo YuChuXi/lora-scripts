@@ -6,6 +6,57 @@ export interface ReleaseEntry {
 
 export const releases: readonly ReleaseEntry[] = [
   {
+    version: "v3.2.0",
+    date: "2026-10-11",
+    items: [
+      "标签编辑重做：标签 / 自由两种模式、批量操作、历史记录；内置离线 Danbooru 中文词典",
+      "设置区重构：新增 API 页（接口与本地模型），网络与下载源归入高级设置",
+      "训练任务队列：自动排队、重启不丢失、可按原配置重新排队",
+      "Musubi 新增 Ideogram 4 LoRA（FP8 量化权重、非商用许可）",
+      "修复 Anima 页面 LoKr / LoHa / T-LoRA 参数在刷新或导入时被重置",
+    ],
+  },
+  {
+    version: "v3.1.3",
+    date: "2026-10-09",
+    items: [
+      "整合包 Musubi / AI Toolkit venv 失效基础 Python 时可自动修复",
+      "Anima 训练支持 2B / 2.9B 规格选择与底模路径记忆",
+      "Kohya 拆为独立引擎，可在设置中安装、修复与卸载",
+      "支持配置默认训练引擎，以及记住上次使用的引擎",
+    ],
+  },
+  {
+    version: "v3.1.2",
+    date: "2026-10-09",
+    items: [
+      "Kohya 拆为独立引擎，可在设置中安装、修复与卸载",
+      "卸载仅清理 extensions/kohya，不触碰 GUI Python / Torch",
+      "支持配置默认训练引擎，以及记住上次使用的引擎",
+      "升级后首次 Kohya 训练前需先安装引擎",
+    ],
+  },
+  {
+    version: "v3.1.1",
+    date: "2026-09-22",
+    items: [
+      "新增 DiffSynth 引擎，支持 Qwen-Image-2.1 BF16 文生图 LoRA",
+      "支持 Comfy-Org 模型组件、图片与 TXT 标注及子目录重复次数",
+      "支持 TE/VAE 缓存、CPU 卸载、分桶及训练中预览",
+      "完成 RTX 4090 短训与独立 ComfyUI LoRA 回载出图验证",
+    ],
+  },
+  {
+    version: "v3.1.0",
+    date: "2026-09-18",
+    items: [
+      "Anima Fast v1.17.1：Anima 2.9B、T-LoRA 与训练安全门禁",
+      "统一训练引擎注册表，并新增 AI Toolkit / Klein 支持",
+      "插件市场、插件宿主与 Pi Agent 扩展能力",
+      "任务工作台、多 GPU、LyCORIS 与断点恢复稳定性修复",
+    ],
+  },
+  {
     version: "v3.0.0",
     date: "2026-08-16",
     items: [

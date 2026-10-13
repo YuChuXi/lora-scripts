@@ -29,6 +29,8 @@ export interface NormalizedExport {
 
 export interface TrainingStart {
   task_id: string
+  queued?: boolean
+  output_name_renamed?: { from: string; to: string }
   train_log_url?: string
   train_log_path?: string
   train_log_query?: string
@@ -51,6 +53,10 @@ export const trainingApi = {
   validateImport: (pageTrainType: string, config: FormModel) => post<ImportValidation>("/api/config/validate-import", { page_train_type: pageTrainType, config }),
   normalizeExport: (pageTrainType: string, config: FormModel) => post<NormalizedExport>("/api/config/normalize-for-export", { page_train_type: pageTrainType, config }),
   run: (config: FormModel) => post<TrainingStart>("/api/run", config),
-  animaFastPreflight: (config: FormModel) => post<PreflightResult>("/api/anima-fast/preflight", config),
-  musubiPreflight: (config: FormModel) => post<PreflightResult>("/api/plugins/musubi/preflight", config),
+  saveParams: (pageTrainType: string, config: FormModel) =>
+    apiData<{ ok: boolean; page_train_type: string }>("/api/config/saved_params", { method: "PUT", body: JSON.stringify({ page_train_type: pageTrainType, config }) }),
+  animaFastPreflight: (config: FormModel) => post<PreflightResult>("/api/engines/anima-fast/preflight", config),
+  diffsynthPreflight: (config: FormModel) => post<PreflightResult>("/api/engines/diffsynth/preflight", config),
+  musubiPreflight: (config: FormModel) => post<PreflightResult>("/api/engines/musubi/preflight", config),
+  aiToolkitPreflight: (config: FormModel) => post<PreflightResult>("/api/engines/ai-toolkit/preflight", config),
 }

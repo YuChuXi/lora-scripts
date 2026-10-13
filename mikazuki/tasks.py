@@ -4,6 +4,7 @@ import os
 import json
 import re
 import threading
+import time
 import uuid
 from collections import deque
 from datetime import datetime
@@ -35,6 +36,13 @@ except ModuleNotFoundError:
 
 def kill_proc_tree(pid, including_parent=True):
     parent = psutil.Process(pid)
+    if including_parent:
+        # Freeze the launcher first so an elastic agent cannot fork a new
+        # worker between the children snapshot and the final kill (#291).
+        try:
+            parent.suspend()
+        except Exception:
+            pass
     children = parent.children(recursive=True)
     for child in children:
         child.kill()
@@ -111,6 +119,10 @@ class Task:
             self.metadata.pop("last_log_lines", None)
             if self.metadata.get("error") == "Training process exited with code 0":
                 self.metadata.pop("error", None)
+            return
+        if self.status == TaskStatus.TERMINATED:
+            # Manual stop: the nonzero exit (usually -9) is expected, don't
+            # present it as a failure reason in the UI.
             return
         message = f"Training process exited with code {returncode}"
         self.metadata.setdefault("error", message)
@@ -209,13 +221,18 @@ class Task:
         self._stdout_thread.start()
 
     def terminate(self):
+        # Mark TERMINATED before killing: the worker's wait() returns as soon
+        # as the process dies and must already see the final status, otherwise
+        # _record_completion() races and logs the -9 exit as a failure.
+        self.status = TaskStatus.TERMINATED
         try:
-            kill_proc_tree(self.process.pid, False)
+            # Kill the whole tree, launcher included: accelerate's elastic
+            # agent respawns killed workers, so killing only children leaves
+            # a zombie that blocks the worker's task.wait() forever (#286).
+            kill_proc_tree(self.process.pid, True)
         except Exception as e:
             log.error(f"Error when killing process: {e}")
-            return
         finally:
-            self.status = TaskStatus.TERMINATED
             self._append_disk_log("[task terminated]")
 
 
@@ -231,6 +248,38 @@ class TaskManager:
         self._compute_queue: deque = deque()
         self._worker: Optional[threading.Thread] = None
         self._persist_path: Optional[Path] = Path(persist_path) if persist_path else None
+        self._auto_retry_max = self._load_auto_retry_max()
+
+    # ---- global auto re-queue on failure (#357) ----
+
+    def _load_auto_retry_max(self) -> int:
+        try:
+            from mikazuki.user_data import UserDataStore
+            value = UserDataStore().read_settings().get("tasks", {}).get("auto_retry_max", 0)
+            return max(0, min(9, int(value)))
+        except Exception:
+            return 0
+
+    @property
+    def auto_retry_max(self) -> int:
+        return self._auto_retry_max
+
+    def set_global_auto_retry(self, count: int) -> int:
+        """Set the global failure re-queue budget (0 disables).
+
+        Persists first and only then commits the in-memory value, so a
+        persistence failure propagates instead of reporting a save that
+        silently vanishes on restart.
+        """
+        count = max(0, min(9, int(count)))
+        from mikazuki.user_data import RevisionConflict, UserDataStore
+        store = UserDataStore()
+        try:
+            store.patch_settings({"tasks": {"auto_retry_max": count}}, store.read_settings()["revision"])
+        except RevisionConflict:
+            store.patch_settings({"tasks": {"auto_retry_max": count}}, store.read_settings()["revision"])
+        self._auto_retry_max = count
+        return count
 
     # ---- queue persistence ----
 
@@ -257,24 +306,49 @@ class TaskManager:
         }
 
     def _persist(self):
-        """Snapshot pending compute work (QUEUED/RUNNING) atomically."""
+        """Snapshot the compute lane (pending work AND terminal history)
+        atomically. Terminal tasks stay on disk until an explicit
+        delete_task()/purge_tasks() removes them; there is no auto cleanup."""
         if not self._persist_path:
             return
         try:
             records = [
                 self._task_record(t) for t in self.tasks.values()
-                if t.lane == LANE_COMPUTE and t.status in (TaskStatus.QUEUED, TaskStatus.RUNNING)
+                if t.lane == LANE_COMPUTE and t.status != TaskStatus.CREATED
             ]
             path = self._persist_path
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(path.suffix + ".tmp")
             tmp.write_text(json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
-            os.replace(tmp, path)
+            self._atomic_replace(tmp, path)
         except Exception as e:
             log.warning(f"Failed to persist task queue / 任务队列持久化失败: {e}")
 
+    @staticmethod
+    def _atomic_replace(tmp: Path, path: Path) -> None:
+        """os.replace with a short bounded retry (Windows transient locks).
+
+        Defender / the search indexer can hold a momentary handle on the
+        freshly written target, making the atomic swap fail with WinError 5.
+        Without a retry the snapshot is silently dropped (only a warning log),
+        so a user's QUEUED training task would be lost across a restart. The
+        retry budget is tiny (<100 ms, only on the rare failure path) because
+        callers may hold self._cond while persisting.
+        """
+        last_err: Optional[OSError] = None
+        for delay in (0.0, 0.01, 0.03, 0.06):
+            if delay:
+                time.sleep(delay)
+            try:
+                os.replace(tmp, path)
+                return
+            except OSError as exc:  # WinError 5 / transient sharing violation
+                last_err = exc
+        raise last_err
+
     def restore_queue(self):
-        """Re-enqueue tasks persisted as QUEUED; mark interrupted RUNNING as FAILED."""
+        """Re-enqueue tasks persisted as QUEUED; mark interrupted RUNNING as
+        FAILED; restore terminal tasks as read-only history (never queued)."""
         path = self._persist_path
         if not path or not path.is_file():
             return
@@ -314,6 +388,23 @@ class TaskManager:
                     self.tasks[task_id] = task
                     self._compute_queue.append(task_id)
                     restored += 1
+                elif record.get("status") in ("FINISHED", "FAILED", "TERMINATED"):
+                    # Terminal history: restore as-is for the workbench list;
+                    # never queued, never held, deletable/retryable as usual.
+                    stored_env = record.get("env") or {}
+                    task = Task(
+                        task_id=task_id,
+                        command=record.get("command") or [],
+                        environ={**os.environ, **stored_env},
+                        metadata=record.get("metadata") or {},
+                        cwd=record.get("cwd"),
+                        lane=LANE_COMPUTE,
+                        group=record.get("group"),
+                    )
+                    task.status = TaskStatus[record["status"]]
+                    returncode = task.metadata.get("returncode")
+                    task.returncode = returncode if isinstance(returncode, int) else None
+                    self.tasks[task_id] = task
                 elif record.get("status") == "RUNNING":
                     # Keep the stored env: the interrupted task stays retryable,
                     # and training commands rely on env like PYTHONPATH (#158).
@@ -355,6 +446,12 @@ class TaskManager:
         lane is busy; call submit()/submit_group() to schedule execution."""
         with self._cond:
             task_id = task_id or str(uuid.uuid4())
+            metadata = dict(metadata or {})
+            if lane == LANE_COMPUTE and metadata.get("config_path"):
+                from mikazuki.user_data import UserDataStore
+                archive = UserDataStore().archive_task(
+                    task_id, metadata, metadata.get("config_path"))
+                metadata["task_archive"] = archive
             task = Task(task_id=task_id, command=command, environ=environ,
                         metadata=metadata, cwd=cwd, lane=lane, group=group)
             if lane == LANE_COMPUTE and self._compute_busy_locked():
@@ -429,6 +526,46 @@ class TaskManager:
             log.error(f"{label} fatal error / 任务出现致命错误: {e}")
         if rc != 0 and task.group:
             self._skip_group_remainder(task, rc)
+        self._maybe_auto_requeue(task, rc)
+
+    def _maybe_auto_requeue(self, task: Task, rc: int) -> None:
+        """Re-queue a failed task while the global auto-retry budget allows (#357).
+
+        Only failures after the training process actually launched qualify:
+        adapter/preflight failures never create a task, and a process that
+        could not even spawn would fail identically on every retry. Manual
+        termination and skipped group remainders are excluded. The usage
+        counter lives on the task itself so one flaky task cannot loop
+        forever.
+        """
+        if rc == 0 or task.status != TaskStatus.FAILED or task.process is None:
+            return
+        if task.lane != LANE_COMPUTE or not task.command:
+            return
+        max_retries = self._auto_retry_max
+        if max_retries <= 0:
+            return
+        try:
+            used = int(task.metadata.get("auto_retry_used") or 0)
+        except (TypeError, ValueError):
+            used = 0
+        if used >= max_retries:
+            return
+        # Set before retry_task() so the rebuilt task(s) inherit the counter.
+        # For stage groups the rebuild copies each member's own metadata, so
+        # the increment must reach every member — otherwise a different stage
+        # failing next attempt would see used == 0 and rerun the whole group
+        # beyond the configured budget.
+        for member in self.tasks.values():
+            if member is task or (task.group and member.group == task.group):
+                member.metadata["auto_retry_used"] = used + 1
+        task.metadata["auto_requeued"] = True
+        self._persist()
+        log.info(
+            f"Task {task.task_id} failed; auto re-queue {used + 1}/{max_retries} "
+            f"/ 任务失败，自动重新排队（第 {used + 1}/{max_retries} 次）"
+        )
+        self.retry_task(task.task_id)
 
     def _skip_group_remainder(self, failed_task: Task, rc: int):
         label = failed_task.metadata.get("stage_label") \
@@ -474,6 +611,31 @@ class TaskManager:
             return
         task.terminate()
 
+    def move_to_front(self, task_id: str) -> bool:
+        """Move a queued compute task (held or not) to the front of the queue,
+        i.e. right after the currently running task. Stage groups move as a
+        whole, preserving stage order and contiguity."""
+        with self._cond:
+            task = self.tasks.get(task_id)
+            if task is None or task_id not in self._compute_queue:
+                return False
+            if task.group:
+                members = [
+                    t for t in self.tasks.values()
+                    if t.group == task.group and t.task_id in self._compute_queue
+                ]
+                members.sort(key=lambda t: list(self._compute_queue).index(t.task_id))
+                ids = [t.task_id for t in members]
+            else:
+                ids = [task_id]
+            for tid in ids:
+                self._compute_queue.remove(tid)
+            for tid in reversed(ids):
+                self._compute_queue.appendleft(tid)
+            self._persist()
+        log.info(f"Task {task_id} moved to queue front ({len(ids)} task(s)) / 任务已提到队列最前")
+        return True
+
     def resume_task(self, task_id: str) -> bool:
         """Release a restored (held) queued task so the worker may run it."""
         task = self.tasks.get(task_id)
@@ -487,6 +649,70 @@ class TaskManager:
         return True
 
     _RETRY_STRIP_METADATA = ("error", "returncode", "finished_at", "last_log_lines", "held", "started_at")
+
+    _TERMINAL_STATUSES = (TaskStatus.FINISHED, TaskStatus.FAILED, TaskStatus.TERMINATED)
+
+    def delete_task(self, task_id: str) -> bool:
+        """Remove a terminal task from the table. Active tasks are refused so
+        a running training can never be dropped from under the worker. Stage
+        groups are deleted atomically: every terminal member goes together,
+        so no half-deleted group can be retried (#291 review)."""
+        with self._cond:
+            task = self.tasks.get(task_id)
+            if task is None or task.status not in self._TERMINAL_STATUSES:
+                return False
+            if task.group:
+                doomed = [
+                    t for t in self.tasks.values()
+                    if t.group == task.group and t.status in self._TERMINAL_STATUSES
+                ]
+            else:
+                doomed = [task]
+            for member in doomed:
+                try:
+                    self._compute_queue.remove(member.task_id)
+                except ValueError:
+                    pass
+                del self.tasks[member.task_id]
+                hub.drop_task(member.task_id)
+            self._persist()
+        log.info(f"Task {task_id} deleted ({len(doomed)} record(s)) / 任务已删除")
+        return True
+
+    def purge_tasks(self, keep_last: int = 0) -> int:
+        """Bulk-delete terminal tasks, keeping the most recent ``keep_last``
+        logical runs. Stage groups count as one run and are only purged when
+        every member is terminal (#291 review)."""
+        with self._cond:
+            groups: Dict[str, List[Task]] = {}
+            for t in self.tasks.values():
+                groups.setdefault(t.group or t.task_id, []).append(t)
+
+            def finished_at(members: List[Task]) -> float:
+                return max(
+                    float(m.metadata["finished_at"] if m.metadata.get("finished_at") is not None
+                          else (m.metadata.get("created_at") or 0))
+                    for m in members
+                )
+
+            eligible = [
+                members for members in groups.values()
+                if all(t.status in self._TERMINAL_STATUSES for t in members)
+            ]
+            eligible.sort(key=finished_at, reverse=True)
+            doomed = [t for members in eligible[max(0, keep_last):] for t in members]
+            for task in doomed:
+                try:
+                    self._compute_queue.remove(task.task_id)
+                except ValueError:
+                    pass
+                del self.tasks[task.task_id]
+                hub.drop_task(task.task_id)
+            if doomed:
+                self._persist()
+        if doomed:
+            log.info(f"Purged {len(doomed)} finished task record(s) / 已清理 {len(doomed)} 条历史记录")
+        return len(doomed)
 
     def retry_task(self, task_id: str) -> Optional[List[Task]]:
         """Re-queue a finished/failed/terminated compute task. Musubi-style
@@ -507,6 +733,7 @@ class TaskManager:
         new_tasks: List[Task] = []
         for member in members:
             metadata = dict(member.metadata)
+            metadata.pop("task_archive", None)
             for key in self._RETRY_STRIP_METADATA:
                 metadata.pop(key, None)
             metadata["retry_of"] = member.task_id

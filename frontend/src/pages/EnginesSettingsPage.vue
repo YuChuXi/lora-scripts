@@ -1,16 +1,17 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { ElMessage, ElMessageBox } from "element-plus"
+import { Rank, Search, MoreFilled, RefreshLeft, ArrowLeft, ArrowRight } from "@element-plus/icons-vue"
 import { useI18n } from "vue-i18n"
 import { enginesApi, type EngineStatus } from "../api/engines"
-import DownloadSourcesPanel from "../components/DownloadSourcesPanel.vue"
 import {
   ENGINE_CATALOG,
-  PRODUCT_DEFAULT_ENGINE,
   type EngineDefinition,
 } from "../engines/catalog"
 import { readEnginePrefs, writeEnginePrefs } from "../engines/prefs"
+import { readEngineOrder, saveEngineOrder, moveEngine, matchesEngineFilter, type EngineFilter } from "../engines/listPreferences"
 import type { TrainingEngine } from "../training/modules"
+import { engineSettingsState, legacyEngineImport, importLegacyEngineSettings } from "../engines/settings"
 
 const { t } = useI18n()
 const loadingId = ref<string | null>(null)
@@ -22,15 +23,38 @@ const activeConsoleId = ref<string | null>(null)
 const manageId = ref<string | null>(null)
 const menuId = ref<string | null>(null)
 const rememberLast = ref(readEnginePrefs().rememberLast)
-const downloadPanel = ref<{ openAdvanced: () => void } | null>(null)
+const defaultEngine = ref(readEnginePrefs().defaultEngine ?? "kohya")
+const catalogIds = ENGINE_CATALOG.map((engine) => engine.id)
+const order = ref(readEngineOrder(catalogIds))
+const saving = ref(false)
+const settingsDisabled = computed(() => saving.value || !engineSettingsState.ready || engineSettingsState.loading)
+const canImportLegacy = computed(() => Object.keys(legacyEngineImport()).length > 0)
+function syncSettings() {
+  const prefs = readEnginePrefs()
+  defaultEngine.value = prefs.defaultEngine ?? "kohya"
+  rememberLast.value = prefs.rememberLast
+  order.value = readEngineOrder(catalogIds)
+}
+watch(() => engineSettingsState.settings, syncSettings)
+const query = ref("")
+const filter = ref<EngineFilter>("all")
+const page = ref(1)
+const pageSize = 5
+const filters: EngineFilter[] = ["all", "installed", "not_installed"]
+const draggedId = ref<string | null>(null)
+const dropTarget = ref<string | null>(null)
+let pointerStart: { x: number; y: number; id: string } | null = null
 let timer: number | undefined
 let logSource: EventSource | undefined
 let progressSource: EventSource | undefined
 
-const MANAGED_ENGINES = new Set(["anima-fast", "musubi"])
+const MANAGED_ENGINES = new Set(["kohya", "anima-fast", "musubi", "ai-toolkit", "diffsynth"])
 const INSTALL_STREAM_BASE: Record<string, string> = {
-  "anima-fast": "/api/plugins/anima-lora/install",
-  musubi: "/api/plugins/musubi/install",
+  kohya: "/api/engines/kohya/install",
+  "anima-fast": "/api/engines/anima-fast/install",
+  musubi: "/api/engines/musubi/install",
+  diffsynth: "/api/engines/diffsynth/install",
+  "ai-toolkit": "/api/engines/ai-toolkit/install",
 }
 
 function isManaged(id: string) {
@@ -38,7 +62,7 @@ function isManaged(id: string) {
 }
 
 function isProductDefault(id: string) {
-  return id === PRODUCT_DEFAULT_ENGINE
+  return id === defaultEngine.value
 }
 
 function workingStatus(id: string): EngineStatus | undefined {
@@ -46,12 +70,110 @@ function workingStatus(id: string): EngineStatus | undefined {
   return status && ["installing", "auditing"].includes(status.state) ? status : undefined
 }
 
-const cards = computed(() => ENGINE_CATALOG.map((engine) => {
+const cards = computed(() => order.value.flatMap((id) => {
+  const engine = ENGINE_CATALOG.find((item) => item.id === id)
+  if (!engine) return []
   const status = statuses.value[engine.id] || defaultStatus(engine)
-  return { engine, status }
+  return [{ engine, status }]
 }))
 
+const visibleCards = computed(() => cards.value.filter(({ engine, status }) => matchesEngineFilter(
+  [engine.id, t(engine.nameKey), t(engine.summaryKey), ...engine.tags.map((tag) => t(`settings.engines.tags.${tag}`))].join(" "),
+  status.state, query.value, filter.value,
+)))
+const pageCount = computed(() => Math.max(1, Math.ceil(visibleCards.value.length / pageSize)))
+const pageCards = computed(() => visibleCards.value.slice((page.value - 1) * pageSize, page.value * pageSize))
+watch([query, filter], () => { page.value = 1 })
+watch(pageCount, (count) => { page.value = Math.min(page.value, count) })
+watch(page, () => { menuId.value = null; endDrag() })
 const manageCard = computed(() => cards.value.find((card) => card.engine.id === manageId.value) || null)
+
+async function persistOrder(next: string[]) {
+  if (settingsDisabled.value) return
+  saving.value = true
+  order.value = next
+  menuId.value = null
+  try {
+    await saveEngineOrder(next)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : t("engineSettings.saveFailed"))
+  } finally {
+    syncSettings()
+    saving.value = false
+  }
+}
+
+function moveByMenu(id: string, direction: "top" | "up" | "down") {
+  const visible = pageCards.value.map((card) => card.engine.id as string)
+  const index = visible.indexOf(id)
+  const target = direction === "top" ? order.value[0] : visible[index + (direction === "up" ? -1 : 1)]
+  if (target) persistOrder(moveEngine(order.value, id, target, direction === "down"))
+  if (direction === "top") page.value = 1
+}
+
+function restoreOrder() {
+  persistOrder([...catalogIds])
+  page.value = 1
+}
+
+function startDrag(event: DragEvent, id: string) {
+  if (settingsDisabled.value) { event.preventDefault(); return }
+  draggedId.value = id
+  menuId.value = null
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move"
+    event.dataTransfer.setData("text/plain", id)
+  }
+}
+
+function overRow(event: DragEvent, id: string) {
+  if (!draggedId.value || draggedId.value === id) return
+  event.preventDefault()
+  dropTarget.value = id
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move"
+}
+
+function endDrag() {
+  draggedId.value = null
+  dropTarget.value = null
+  pointerStart = null
+}
+
+function startPointer(event: PointerEvent, id: string) {
+  if (event.button !== 0 || settingsDisabled.value) return
+  event.preventDefault()
+  pointerStart = { x: event.clientX, y: event.clientY, id }
+  ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
+  menuId.value = null
+}
+
+function movePointer(event: PointerEvent) {
+  if (!pointerStart) return
+  if (!draggedId.value && Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) < 6) return
+  draggedId.value = pointerStart.id
+  const row = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>(".engine-row")
+  const target = row?.dataset.engine
+  dropTarget.value = target && target !== draggedId.value ? target : null
+}
+
+function finishPointer() {
+  if (draggedId.value && dropTarget.value) {
+    persistOrder(moveEngine(order.value, draggedId.value, dropTarget.value))
+  }
+  endDrag()
+}
+
+function dropRow(event: DragEvent, target: string) {
+  if (!draggedId.value) return
+  event.preventDefault()
+  persistOrder(moveEngine(order.value, draggedId.value, target))
+  endDrag()
+}
+
+function clearFilters() {
+  query.value = ""
+  filter.value = "all"
+}
 
 function defaultStatus(engine: EngineDefinition): EngineStatus {
   if (engine.kind === "builtin") return { id: engine.id, state: "ready", featureEnabled: true }
@@ -169,11 +291,37 @@ async function uninstall(engineId: TrainingEngine) {
   }
 }
 
-function saveRemember() {
-  const prefs = readEnginePrefs()
-  prefs.rememberLast = rememberLast.value
-  writeEnginePrefs(prefs)
-  ElMessage.success(t("settings.engines.msg.prefsSaved"))
+async function saveRemember(field: "defaultEngine" | "rememberLast") {
+  if (settingsDisabled.value) return
+  saving.value = true
+  try {
+    await writeEnginePrefs(field === "defaultEngine"
+      ? { defaultEngine: defaultEngine.value }
+      : { rememberLast: rememberLast.value })
+    ElMessage.success(t("settings.engines.msg.prefsSaved"))
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : t("engineSettings.saveFailed"))
+  } finally {
+    syncSettings()
+    saving.value = false
+  }
+}
+
+async function importLegacy() {
+  if (settingsDisabled.value) return
+  saving.value = true
+  try {
+    await ElMessageBox.confirm(t("engineSettings.importConfirm"), t("engineSettings.import"), { type: "warning" })
+    await importLegacyEngineSettings()
+    ElMessage.success(t("settings.engines.msg.prefsSaved"))
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") {
+      ElMessage.error(error instanceof Error ? error.message : t("engineSettings.saveFailed"))
+    }
+  } finally {
+    syncSettings()
+    saving.value = false
+  }
 }
 
 function openManage(engineId: string) {
@@ -190,7 +338,7 @@ function toggleMenu(engineId: string) {
 }
 
 function runtimePath(status: EngineStatus) {
-  return status.runtime?.animaRoot || status.runtime?.musubiRoot || status.runtime?.environmentPath || ""
+  return status.runtime?.animaRoot || status.runtime?.musubiRoot || status.runtime?.toolkitRoot || status.runtime?.environmentPath || ""
 }
 
 async function copyPath(status: EngineStatus) {
@@ -236,85 +384,93 @@ onBeforeUnmount(() => {
     <header class="engines-page-head">
       <div>
         <h2>{{ t("settings.engines.title") }}</h2>
-        <p>{{ t("settings.engines.leadShort") }}</p>
       </div>
     </header>
+    <button v-if="canImportLegacy" type="button" data-action="import-legacy" :disabled="settingsDisabled" @click="importLegacy">{{ t("engineSettings.import") }}</button>
 
     <section class="engines-toolbar" :aria-label="t('settings.engines.toolbarAria')">
       <label class="toolbar-field">
         <span>{{ t("settings.engines.defaultEngine.label") }}</span>
         <div class="toolbar-default">
-          <select disabled :value="PRODUCT_DEFAULT_ENGINE" :aria-label="t('settings.engines.defaultEngine.label')">
-            <option :value="PRODUCT_DEFAULT_ENGINE">{{ t("settings.engines.catalog.kohya.name") }}</option>
+          <select v-model="defaultEngine" :disabled="settingsDisabled" :aria-label="t('settings.engines.defaultEngine.label')" @change="saveRemember('defaultEngine')">
+            <option v-for="item in ENGINE_CATALOG" :key="item.id" :value="item.id">{{ t(item.nameKey) }}</option>
           </select>
           <i class="engine-badge is-default">{{ t("settings.engines.badges.currentDefault") }}</i>
         </div>
       </label>
 
       <label class="toolbar-remember">
-        <input v-model="rememberLast" type="checkbox" @change="saveRemember">
+        <input v-model="rememberLast" :disabled="settingsDisabled" type="checkbox" @change="saveRemember('rememberLast')">
         <span>
           <b>{{ t("settings.engines.rememberLast.label") }}</b>
           <small>{{ t("settings.engines.rememberLast.hintShort") }}</small>
         </span>
       </label>
-
-      <label class="toolbar-field toolbar-source">
-        <span>{{ t("settings.engines.downloadSources.title") }}</span>
-        <DownloadSourcesPanel ref="downloadPanel" compact />
-      </label>
     </section>
 
     <div class="engines-list-head">
-      <h3>{{ t("settings.engines.listTitle") }}</h3>
+      <h3>{{ t("settings.engines.listTitle") }} <span aria-live="polite">{{ visibleCards.length }} / {{ cards.length }}</span></h3>
+      <div class="engine-list-tools">
+        <label class="engine-search">
+          <Search aria-hidden="true" />
+          <input v-model="query" type="search" :aria-label="t('settings.engines.list.search')" :placeholder="t('settings.engines.list.search')">
+        </label>
+        <div class="engine-filter" role="group" :aria-label="t('settings.engines.list.filter')">
+          <button v-for="item in filters" :key="item" type="button" :data-filter="item" :aria-pressed="filter === item" @click="filter = item">{{ t(`settings.engines.list.${item}`) }}</button>
+        </div>
+        <div class="engine-more">
+          <button type="button" class="engine-more-btn" :title="t('settings.engines.list.options')" :aria-label="t('settings.engines.list.options')" :aria-expanded="menuId === 'list'" @click.stop="toggleMenu('list')"><MoreFilled /></button>
+          <div v-if="menuId === 'list'" class="engine-more-menu">
+            <button type="button" :disabled="settingsDisabled" @click="restoreOrder"><RefreshLeft />{{ t("settings.engines.list.restore") }}</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="engine-rows">
       <article
-        v-for="card in cards"
+        v-for="(card, index) in pageCards"
         :key="card.engine.id"
         class="engine-row"
         :data-engine="card.engine.id"
         :data-state="card.status.state"
+        :class="{ 'is-dragging': draggedId === card.engine.id, 'is-drop-target': dropTarget === card.engine.id }"
+        @dragover="overRow($event, card.engine.id)"
+        @dragleave="dropTarget === card.engine.id && (dropTarget = null)"
+        @drop="dropRow($event, card.engine.id)"
       >
+        <button
+type="button" class="engine-drag-handle" draggable="true"
+          :disabled="settingsDisabled"
+          :title="t('settings.engines.list.reorder', { name: t(card.engine.nameKey) })"
+          :aria-label="t('settings.engines.list.reorder', { name: t(card.engine.nameKey) })"
+          @dragstart="startDrag($event, card.engine.id)" @dragend="endDrag"
+          @pointerdown="startPointer($event, card.engine.id)" @pointermove="movePointer"
+          @pointerup="finishPointer" @pointercancel="endDrag" @lostpointercapture="endDrag"
+          @keydown.esc="endDrag"
+          @keydown.alt.up.prevent="moveByMenu(card.engine.id, 'up')"
+          @keydown.alt.down.prevent="moveByMenu(card.engine.id, 'down')"
+        ><Rank aria-hidden="true" /></button>
         <div class="engine-row-main">
           <div class="engine-logo" :data-engine="card.engine.id">{{ card.engine.mark }}</div>
           <div class="engine-copy">
             <div class="engine-title-line">
               <h4>{{ t(card.engine.nameKey) }}</h4>
               <span v-if="isProductDefault(card.engine.id)" class="engine-badge is-default">{{ t("settings.engines.badges.currentDefault") }}</span>
-              <span v-else-if="card.status.state === 'ready'" class="engine-badge is-ready">{{ t("settings.engines.badges.installed") }}</span>
+              <span v-if="card.status.state === 'ready'" class="engine-badge is-ready">{{ t("settings.engines.badges.installed") }}</span>
               <span v-else-if="['installing', 'auditing'].includes(card.status.state)" class="engine-badge is-busy">{{ t(`settings.engines.state.${card.status.state}`) }}</span>
               <span v-else-if="card.status.state === 'broken'" class="engine-badge is-broken">{{ t("settings.engines.state.broken") }}</span>
-              <span v-else class="engine-badge is-missing">{{ t("settings.engines.badges.notInstalled") }}</span>
+              <span v-else class="engine-badge is-missing">{{ t(`settings.engines.state.${card.status.state}`) }}</span>
               <span v-if="card.engine.recommended && !isProductDefault(card.engine.id)" class="engine-badge is-rec">{{ t("settings.engines.badges.recommended") }}</span>
             </div>
-            <p>{{ t(card.engine.summaryKey) }}</p>
             <ul class="engine-tags">
               <li v-for="tag in card.engine.tags" :key="tag">{{ t(`settings.engines.tags.${tag}`) }}</li>
             </ul>
           </div>
         </div>
 
-        <div class="engine-meta-cols">
-          <div>
-            <small>{{ t("settings.engines.meta.version") }}</small>
-            <b>{{ displayVersion(card.engine, card.status) }}</b>
-          </div>
-          <div>
-            <small>{{ t("settings.engines.meta.updated") }}</small>
-            <b>{{ card.engine.updatedAt }}</b>
-          </div>
-        </div>
-
         <div class="engine-row-actions">
-          <template v-if="isProductDefault(card.engine.id)">
-            <div class="engine-default-lock">
-              <b>{{ t("settings.engines.badges.currentDefault") }}</b>
-              <small>{{ t("settings.engines.defaultEngine.locked") }}</small>
-            </div>
-          </template>
-          <template v-else-if="isManaged(card.engine.id)">
+          <template v-if="isManaged(card.engine.id)">
             <button
               v-if="card.status.state === 'ready' || card.status.state === 'broken' || card.status.state === 'installed_unverified'"
               type="button"
@@ -335,9 +491,14 @@ onBeforeUnmount(() => {
             </button>
 
             <div class="engine-more">
-              <button type="button" class="engine-more-btn" :aria-label="t('settings.engines.actions.more')" @click.stop="toggleMenu(card.engine.id)">⋯</button>
-              <div v-if="menuId === card.engine.id" class="engine-more-menu" role="menu">
-                <button type="button" role="menuitem" @click="refresh()">{{ t("settings.engines.actions.refresh") }}</button>
+              <button type="button" class="engine-more-btn" :title="t('settings.engines.actions.more')" :aria-label="t('settings.engines.actions.more')" :aria-expanded="menuId === card.engine.id" @click.stop="toggleMenu(card.engine.id)"><MoreFilled /></button>
+              <div v-if="menuId === card.engine.id" class="engine-more-menu" @keydown.esc="menuId = null">
+                <button type="button" data-action="top" :disabled="settingsDisabled || order[0] === card.engine.id" @click="moveByMenu(card.engine.id, 'top')">{{ t("settings.engines.list.top") }}</button>
+                <button type="button" data-action="up" :disabled="settingsDisabled || index === 0" @click="moveByMenu(card.engine.id, 'up')">{{ t("settings.engines.list.up") }}</button>
+                <button type="button" data-action="down" :disabled="settingsDisabled || index === pageCards.length - 1" @click="moveByMenu(card.engine.id, 'down')">{{ t("settings.engines.list.down") }}</button>
+                <hr>
+                <button type="button" @click="openManage(card.engine.id)">{{ t("settings.engines.list.details") }}</button>
+                <button type="button" @click="refresh()">{{ t("settings.engines.actions.refresh") }}</button>
                 <button type="button" role="menuitem" :disabled="!runtimePath(card.status)" @click="copyPath(card.status)">{{ t("settings.engines.actions.copyPath") }}</button>
                 <button
                   type="button"
@@ -364,7 +525,21 @@ onBeforeUnmount(() => {
       </article>
     </div>
 
-    <p class="engines-end">{{ t("settings.engines.end") }}</p>
+    <nav v-if="pageCount > 1" class="engine-pagination" :aria-label="t('settings.engines.list.pagination')">
+      <span>{{ t("settings.engines.list.perPage", { count: pageSize }) }}</span>
+      <button
+type="button" class="engine-more-btn" data-page="previous" :disabled="page === 1"
+        :title="t('settings.engines.list.previous')" :aria-label="t('settings.engines.list.previous')" @click="page--"><ArrowLeft /></button>
+      <span aria-live="polite">{{ page }} / {{ pageCount }}</span>
+      <button
+type="button" class="engine-more-btn" data-page="next" :disabled="page === pageCount"
+        :title="t('settings.engines.list.next')" :aria-label="t('settings.engines.list.next')" @click="page++"><ArrowRight /></button>
+    </nav>
+
+    <div v-if="!visibleCards.length" class="engine-list-empty">
+      <p>{{ t("settings.engines.list.empty") }}</p>
+      <button type="button" class="secondary-action engine-clear-filters" @click="clearFilters">{{ t("settings.engines.list.clear") }}</button>
+    </div>
 
     <Teleport to="body">
       <div v-if="manageCard" class="ds-modal-backdrop" @click.self="closeManage">
@@ -377,6 +552,11 @@ onBeforeUnmount(() => {
             </div>
             <button type="button" class="ds-close" :aria-label="t('settings.engines.downloadSources.close')" @click="closeManage">×</button>
           </header>
+          <p>{{ t(manageCard.engine.summaryKey) }}</p>
+          <div class="engine-meta-cols">
+            <div><small>{{ t("settings.engines.meta.version") }}</small><b>{{ displayVersion(manageCard.engine, manageCard.status) }}</b></div>
+            <div><small>{{ t("settings.engines.meta.updated") }}</small><b>{{ manageCard.engine.updatedAt }}</b></div>
+          </div>
           <p v-if="runtimePath(manageCard.status)" class="engine-path">
             <span>{{ t("settings.engines.meta.path") }}</span>
             <code>{{ runtimePath(manageCard.status) }}</code>

@@ -18,7 +18,15 @@ class AnimaFastStaticIntegrationTests(unittest.TestCase):
         self.assertNotIn("prodigyplus.ProdigyPlusScheduleFree", fast_optimizer)
         self.assertNotIn('"EmoSens"', fast_optimizer)
         self.assertIn('"EmoSens"', shared[: shared.index("ANIMA_FAST_LR_OPTIMIZER")])
-        self.assertIn('Schema.const("lora")', schema)
+        self.assertIn('fast_variant: Schema.union(["lora", "tlora"])', schema)
+        self.assertIn('.default("lora")', schema)
+        self.assertNotIn('"turbo"', schema)
+        self.assertIn("compile_dynamic_seq:", schema)
+        self.assertIn("use_vae_cache:", schema)
+        self.assertIn("use_text_cache:", schema)
+        self.assertNotIn("static_token_count:", schema)
+        self.assertNotIn("compile_mode:", schema)
+        self.assertNotIn("cache_latents:", schema)
 
     def test_fast_schema_exposes_bucket_resolution_controls(self):
         schema = Path("mikazuki/schema/anima-lora-fast.ts").read_text(encoding="utf-8")
@@ -29,35 +37,71 @@ class AnimaFastStaticIntegrationTests(unittest.TestCase):
         self.assertIn("bucket_no_upscale:", schema)
         self.assertIn("留空时按训练分辨率自动设置", schema)
 
+    def test_fast_presets_use_explicit_curated_variants_and_v117_fields(self):
+        presets = Path("config/presets")
+        expected = {
+            "anima-fast-lora-character.toml": "lora",
+            "anima-fast-lora-style.toml": "lora",
+            "anima-fast-lora-character-tlora.toml": "tlora",
+            "anima-fast-lora-style-tlora.toml": "tlora",
+        }
+        for name, variant in expected.items():
+            text = (presets / name).read_text(encoding="utf-8")
+            self.assertIn('train_type = "anima-lora-fast"', text)
+            self.assertIn(f'fast_variant = "{variant}"', text)
+            self.assertIn("use_vae_cache = false", text)
+            self.assertIn("use_text_cache = false", text)
+            self.assertIn("compile_dynamic_seq = true", text)
+            self.assertNotIn("static_token_count", text)
+            self.assertNotIn("compile_mode", text)
+            self.assertNotIn("dynamo_backend", text)
+
+    def test_fast_schema_and_presets_default_to_adamw(self):
+        shared = Path("mikazuki/schema/shared.ts").read_text(encoding="utf-8")
+        fast_optimizer = shared[shared.index("ANIMA_FAST_LR_OPTIMIZER"):]
+        self.assertIn(']).default("AdamW").description("优化器（仅 anima_lora Fast 已支持的选项）")', fast_optimizer)
+
+        presets = Path("config/presets")
+        for name in (
+            "anima-fast-lora-character.toml",
+            "anima-fast-lora-style.toml",
+            "anima-fast-lora-character-tlora.toml",
+            "anima-fast-lora-style-tlora.toml",
+        ):
+            text = (presets / name).read_text(encoding="utf-8")
+            self.assertIn('optimizer_type = "AdamW"', text, name)
+            self.assertNotIn('optimizer_type = "AdamW8bit"', text, name)
+
     def test_fast_adapter_does_not_whitelist_emosens(self):
-        adapter = Path("mikazuki/anima_fast_backend/adapter.py").read_text(encoding="utf-8")
+        adapter = Path("mikazuki/engines/anima_fast/adapter.py").read_text(encoding="utf-8")
         self.assertIn("FAST_SUPPORTED_OPTIMIZERS", adapter)
         self.assertNotIn('"EmoSens"', adapter)
         self.assertNotIn('"Automagic",', adapter[adapter.index("FAST_SUPPORTED_OPTIMIZERS"): adapter.index("@dataclass")])
+        self.assertNotIn("mikazuki.engines", adapter)
 
     def test_fast_train_type_is_not_legacy_trainer_mapping(self):
-        source = Path("mikazuki/app/api.py").read_text(encoding="utf-8")
+        source = Path("mikazuki/engines/kohya/run.py").read_text(encoding="utf-8")
         module = ast.parse(source)
         mapping = None
         for node in module.body:
             if isinstance(node, ast.Assign):
                 for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id == "trainer_mapping":
+                    if isinstance(target, ast.Name) and target.id == "TRAINER_MAPPING":
                         mapping = ast.literal_eval(node.value)
         self.assertIsNotNone(mapping)
         self.assertNotIn("anima-lora-fast", mapping)
         self.assertEqual(mapping["anima-lora"], "./scripts/dev/anima_train_network.py")
         self.assertEqual(mapping["sd3-lora"], "./scripts/dev/anima_train_network.py")
 
-    def test_api_contains_fast_early_branch_and_plugin_routes(self):
+    def test_api_dispatches_run_via_registry_and_mounts_engine_routes(self):
         source = Path("mikazuki/app/api.py").read_text(encoding="utf-8")
 
-        self.assertIn("model_train_type == ANIMA_FAST_TRAIN_TYPE", source)
-        self.assertIn('"/plugins/anima-lora/status"', source)
-        self.assertIn('"/plugins/anima-lora/preflight"', source)
-        self.assertIn('"/plugins/anima-lora/dry-run"', source)
-        self.assertIn('"/plugins/anima-lora/install/log/stream/{task_id}"', source)
-        self.assertLess(source.index("model_train_type == ANIMA_FAST_TRAIN_TYPE"), source.index("trainer_file = trainer_mapping[model_train_type]"))
+        self.assertIn("dispatch_run(", source)
+        self.assertIn('"/engines/{engine_id}/status"', source)
+        self.assertIn('"/engines/{engine_id}/preflight"', source)
+        self.assertIn('"/engines/{engine_id}/dry-run"', source)
+        self.assertIn('"/engines/{engine_id}/install/log/stream/{task_id}"', source)
+        self.assertNotIn('"/plugins/anima-lora/status"', source)
 
     def test_frontend_dist_registers_anima_fast_entry(self):
         router = Path("frontend/src/router.ts").read_text(encoding="utf-8")

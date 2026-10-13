@@ -7,6 +7,8 @@ import DatasetPage from "./DatasetPage.vue"
 import TaggerPage from "./TaggerPage.vue"
 import DatasetEditorPage from "./DatasetEditorPage.vue"
 import { i18n } from "../i18n"
+import { datasetApi } from "../api/dataset"
+import { useDatasetEditorSession } from "../composables/useDatasetEditorSession"
 
 vi.mock("../stores/tagger", async () => {
   const { ref } = await import("vue")
@@ -33,11 +35,22 @@ vi.mock("../stores/tagger", async () => {
 vi.mock("../api/dataset", () => ({
   datasetApi: {
     scan: vi.fn(),
+    tagTranslations: vi.fn().mockResolvedValue({ items: [], provider: "danbooru", locale: "zh-CN" }),
+    tagTranslationConfig: vi.fn(),
+    saveTagTranslationConfig: vi.fn(),
     saveCaption: vi.fn(),
     batchEdit: vi.fn(),
-    history: vi.fn(),
+    history: vi.fn().mockResolvedValue({ can_undo: false, can_redo: false, changes: [] }),
     undo: vi.fn(),
     redo: vi.fn(),
+  },
+}))
+
+vi.mock("../api/datasets", () => ({
+  datasetFileUrl: vi.fn((name: string, path: string) => `/datasets/${name}/${path}`),
+  datasetsApi: {
+    list: vi.fn().mockResolvedValue({ datasets: [] }),
+    deleteFiles: vi.fn(),
   },
 }))
 
@@ -100,6 +113,92 @@ describe("DatasetPage tab keep-alive", () => {
     expect(editorEvents).not.toContain("unmount")
     expect(taggerEvents).not.toContain("unmount")
     wrapper.unmount()
+  })
+})
+
+describe("DatasetEditorPage route session", () => {
+  it("restores the selected dataset and an unsaved caption after remount", async () => {
+    const session = useDatasetEditorSession()
+    session.lastPath.value = "D:/datasets/sample"
+    session.lastRoot.value = ""
+    session.selected.value = ""
+    session.drafts.value = {}
+    session.resetInMemoryDataset()
+    vi.mocked(datasetApi.scan).mockResolvedValue({
+      root: "D:/datasets/sample",
+      total: 1,
+      items: [{
+        name: "sample.png",
+        relative_path: "sample.png",
+        category: "",
+        caption: "blue_eyes",
+        caption_exists: true,
+        tags: ["blue_eyes"],
+        image_url: "/image",
+        thumb_url: "/thumb",
+      }],
+      tags: [{ tag: "blue_eyes", count: 1 }],
+      categories: [],
+    })
+
+    const harness = defineComponent({
+      components: { Page: DatasetEditorPage },
+      template: "<KeepAlive><Page /></KeepAlive>",
+    })
+    const wrapper = mount(harness, {
+      global: {
+        plugins: [i18n],
+        stubs: { PathPickerDialog: true, TagFilterPanel: true, "el-dialog": true },
+      },
+    })
+    await flushPromises()
+
+    // Default state stays a pure gallery; the editor opens once an image is picked.
+    expect(wrapper.find(".caption-panel .primary-action").exists()).toBe(false)
+    await wrapper.get(".image-grid button").trigger("click")
+    await nextTick()
+    // The raw caption textarea lives in the 自由编辑 mode; 标签编辑 shows chips.
+    await wrapper.findAll(".caption-mode button").find((button) => button.text().includes("自由编辑"))!.trigger("click")
+    await nextTick()
+    expect((wrapper.find("textarea").element as HTMLTextAreaElement).value).toBe("blue_eyes")
+    wrapper.unmount()
+
+    // Simulate a browser refresh: the in-memory scan result is gone, but the
+    // persisted dataset root and selected image remain available for restore.
+    session.resetInMemoryDataset()
+    session.selected.value = "sample.png"
+    const refreshed = mount(harness, {
+      global: {
+        plugins: [i18n],
+        stubs: { PathPickerDialog: true, TagFilterPanel: true, "el-dialog": true },
+      },
+    })
+    await flushPromises()
+    await refreshed.findAll(".caption-mode button").find((button) => button.text().includes("自由编辑"))!.trigger("click")
+    await nextTick()
+    expect((refreshed.find("textarea").element as HTMLTextAreaElement).value).toBe("blue_eyes")
+
+    const editor = refreshed.find("textarea")
+    expect(editor.exists()).toBe(true)
+    await editor.setValue("blue_eyes, long_hair")
+    await nextTick()
+
+    refreshed.unmount()
+
+    const restored = mount(harness, {
+      global: {
+        plugins: [i18n],
+        stubs: { PathPickerDialog: true, TagFilterPanel: true, "el-dialog": true },
+      },
+    })
+    await flushPromises()
+
+    await restored.findAll(".caption-mode button").find((button) => button.text().includes("自由编辑"))!.trigger("click")
+    await nextTick()
+    expect((restored.find("textarea").element as HTMLTextAreaElement).value).toBe("blue_eyes, long_hair")
+    expect(session.lastRoot.value).toBe("D:/datasets/sample")
+    expect(session.getDraft("D:/datasets/sample", "sample.png")).toBe("blue_eyes, long_hair")
+    restored.unmount()
   })
 })
 

@@ -9,6 +9,34 @@ import {
 } from "./params"
 
 describe("training parameter conversion", () => {
+  it.each([
+    "klein-lora",
+    "ai-toolkit-sdxl-lora",
+    "ai-toolkit-sd15-lora",
+    "ai-toolkit-ideogram4-lora",
+    "ai-toolkit-flux-lora",
+    "ai-toolkit-anima-lora",
+    "ai-toolkit-krea2-lora",
+    "ai-toolkit-qwen-image-21-lora",
+  ])("normalizes GPU labels for %s without mutating the form", (schemaName) => {
+    const source = { gpu_ids: ["GPU 0: NVIDIA RTX 4090", "GPU 12: NVIDIA RTX 3090", "3", 2, ""] }
+    const result = buildTrainingConfig(source, schemaName)
+
+    expect(result.gpu_ids).toEqual(["0", "12", "3", "2"])
+    expect(source.gpu_ids).toEqual(["GPU 0: NVIDIA RTX 4090", "GPU 12: NVIDIA RTX 3090", "3", 2, ""])
+  })
+
+  it("preserves DiffSynth GPU values", () => {
+    const gpu_ids = ["GPU 0: NVIDIA RTX 4090", 2, ""]
+    expect(buildTrainingConfig({ gpu_ids }, "qwen-image-21-lora").gpu_ids).toEqual(gpu_ids)
+  })
+
+  it("preserves absent, empty, and scalar Toolkit GPU selections", () => {
+    expect(buildTrainingConfig({}, "klein-lora")).not.toHaveProperty("gpu_ids")
+    expect(buildTrainingConfig({ gpu_ids: [] }, "klein-lora").gpu_ids).toEqual([])
+    expect(buildTrainingConfig({ gpu_ids: "0,2" }, "klein-lora").gpu_ids).toBe("0,2")
+  })
+
   it("fills basic defaults and normalizes paths and GPU ids", () => {
     const result = buildTrainingConfig({
       pretrained_model_name_or_path: "D:\\models\\base.safetensors",
@@ -83,9 +111,10 @@ describe("training parameter conversion", () => {
   })
 
   it("hydrates canonical argument lists for the GUI", () => {
-    expect(hydrateImportedConfig({ network_args: ["algo=loha", "factor=4"], optimizer_args: ["weight_decay=0.1"] })).toMatchObject({
+    expect(hydrateImportedConfig({ network_args: ["algo=loha", "factor=4", "use_cp=True"], optimizer_args: ["weight_decay=0.1"] })).toMatchObject({
       lycoris_algo: "loha",
-      factor: "4",
+      lokr_factor: 4,
+      use_cp: true,
       optimizer_args_custom: ["weight_decay=0.1"],
     })
   })
@@ -117,6 +146,12 @@ describe("cross-schema carry-over (#271)", () => {
       train_data_dir: "./data/oc",
       learning_rate: 2e-4,
     })
+  })
+
+  it("denies engine-specific DiT paths from crossing schema boundaries", () => {
+    const defaults = { dit: "./sd-models/klein/flux2-klein-base-4b", train_data_dir: "./train/aki" }
+    const carry = { dit: "./sd-models/krea2/krea2.safetensors", train_data_dir: "./data/oc" }
+    expect(pickCarryOverFields(carry, defaults)).toEqual({ train_data_dir: "./data/oc" })
   })
 
   it("strips denied keys from poisoned autosave when train type mismatches schema defaults", () => {

@@ -8,6 +8,7 @@ from unittest import mock
 
 from mikazuki.anima_backend.upstream import (
     _is_initialized_git_checkout,
+    pinned_commit,
     prefer_upstream_imports,
     resolve_upstream_path,
     upstream_entrypoint,
@@ -59,12 +60,19 @@ class AnimaBackendUpstreamTests(unittest.TestCase):
                 sys.path[:] = original
 
     def test_verify_pinned_commit_matches_submodule_head(self):
-        root = Path.cwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root, upstream = self._make_fake_repo(temp_dir, "deadbeef", upstream_initialized=True)
+            actual = subprocess.run(
+                ["git", "-C", str(upstream), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            config = root / "config" / "anima_backend.toml"
+            config.write_text(
+                config.read_text(encoding="utf-8").replace("deadbeef", actual),
+                encoding="utf-8",
+            )
 
-        self.assertEqual(
-            verify_pinned_commit(root),
-            "502cc3fab2aa22c106580e2e05c4692cfde5e5ff",
-        )
+            self.assertEqual(verify_pinned_commit(root), actual)
 
     def _git(self, cwd: Path, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -113,8 +121,9 @@ class AnimaBackendUpstreamTests(unittest.TestCase):
     def test_verify_pinned_commit_raises_for_uninitialized_submodule(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root, upstream = self._make_fake_repo(temp_dir, "deadbeef", upstream_initialized=False)
-            with self.assertRaises(RuntimeError) as ctx:
-                verify_pinned_commit(root)
+            with mock.patch.dict(os.environ, {"ANIMA_STRICT_COMMIT": "1", "ANIMA_ALLOW_COMMIT_DRIFT": ""}):
+                with self.assertRaises(RuntimeError) as ctx:
+                    verify_pinned_commit(root)
             self.assertIn("git submodule update --init", str(ctx.exception))
             self.assertIn(str(upstream), str(ctx.exception))
 
@@ -130,8 +139,9 @@ class AnimaBackendUpstreamTests(unittest.TestCase):
     def test_verify_pinned_commit_raises_on_commit_drift(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root, _ = self._make_fake_repo(temp_dir, "deadbeef", upstream_initialized=True)
-            with self.assertRaises(RuntimeError) as ctx:
-                verify_pinned_commit(root)
+            with mock.patch.dict(os.environ, {"ANIMA_STRICT_COMMIT": "1", "ANIMA_ALLOW_COMMIT_DRIFT": ""}):
+                with self.assertRaises(RuntimeError) as ctx:
+                    verify_pinned_commit(root)
             self.assertIn("commit mismatch", str(ctx.exception))
 
     def test_verify_pinned_commit_drift_allowed_via_env(self):
@@ -174,11 +184,14 @@ class AnimaBackendUpstreamTests(unittest.TestCase):
                     return subprocess.CompletedProcess(cmd, 0, "", "")
                 return real_run(cmd, *args, **kwargs)
 
-            with mock.patch.object(upstream_mod.subprocess, "run", side_effect=fake_run):
+            with mock.patch.object(upstream_mod.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.dict(os.environ, {"ANIMA_STRICT_COMMIT": "1", "ANIMA_ALLOW_COMMIT_DRIFT": ""}):
                 # Drift is expected (pinned != actual) but auto-init must have
-                # run before the drift check kicks in.
-                with self.assertRaises(RuntimeError) as ctx:
-                    verify_pinned_commit(root)
+                # run before the drift check kicks in. Drift only raises under
+                # ANIMA_STRICT_COMMIT=1; default is warn+continue.
+                with mock.patch.dict(os.environ, {"ANIMA_STRICT_COMMIT": "1"}):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        verify_pinned_commit(root)
                 self.assertIn("commit mismatch", str(ctx.exception))
 
 
